@@ -1,0 +1,87 @@
+# Render Blueprint for the HR app. In Render: New → Blueprint → pick this repo.
+services:
+  - type: web
+    name: beautybayafrica-hr-api
+    runtime: node
+    # Same area as the Neon database (aws-eu-central-1), so queries stay fast.
+    region: frankfurt
+    plan: free
+    branch: main
+    # Installs and builds only the API and the shared types it uses.
+    buildCommand: >-
+      corepack pnpm install --frozen-lockfile --filter api... &&
+      corepack pnpm --filter api... run build
+    # Applies any new database migrations, then starts the server.
+    startCommand: cd apps/api && node dist/migrate.js && node dist/index.js
+    healthCheckPath: /health
+    # Only redeploy when the API or its shared code changes.
+    buildFilter:
+      paths:
+        - apps/api/**
+        - packages/**
+        - package.json
+        - pnpm-lock.yaml
+        - pnpm-workspace.yaml
+        - render.yaml
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      # Render sits in front of the server as a proxy.
+      - key: TRUST_PROXY
+        value: "1"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: TIME_ZONE
+        value: Africa/Lagos
+      # Asked for when the Blueprint is created. Copy the two database values
+      # from the repo root's .env.local (written by `neon env pull`).
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_URL_UNPOOLED
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+
+  # The website: the HR office and staff portal, built as static files.
+  - type: web
+    name: beautybayafrica-hr
+    runtime: static
+    branch: main
+    buildCommand: >-
+      corepack pnpm install --frozen-lockfile --filter web... &&
+      corepack pnpm --filter web... run build
+    staticPublishPath: apps/web/out
+    buildFilter:
+      paths:
+        - apps/web/**
+        - packages/**
+        - package.json
+        - pnpm-lock.yaml
+        - pnpm-workspace.yaml
+        - render.yaml
+    # Each page is exported as <page>.html; serve it at its plain address.
+    routes:
+      - type: rewrite
+        source: /login
+        destination: /login.html
+      - type: rewrite
+        source: /employees
+        destination: /employees.html
+      - type: rewrite
+        source: /departments
+        destination: /departments.html
+      - type: rewrite
+        source: /leave
+        destination: /leave.html
+      - type: rewrite
+        source: /payroll
+        destination: /payroll.html
+      - type: rewrite
+        source: /me
+        destination: /me.html
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      # The server the website talks to; baked in when the site is built.
+      - key: NEXT_PUBLIC_API_URL
+        value: https://beautybayafrica-hr-api.onrender.com

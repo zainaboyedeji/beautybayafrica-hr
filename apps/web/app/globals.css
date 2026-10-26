@@ -1,0 +1,96 @@
+@import "tailwindcss";
+
+/* Beauty Bay Africa palette: hot pink accent on clean white, near-black type.
+   Pink fills carry ink text (white on #f847b4 is too faint); brand-deep is the
+   readable pink for links and active text. The HR app adds a lilac wash and
+   soft pink shadows so it feels lighter than the POS. */
+@theme {
+  --color-brand: #f847b4;
+  --color-brand-hover: #ec2aa3;
+  --color-brand-soft: #ffd9f0;
+  --color-brand-deep: #a8126d;
+  --color-ink: #141414;
+  --color-muted: #6e6a6c;
+  --color-line: #f5e1ec;
+  --color-line-strong: #ebcfdf;
+  --color-surface-alt: #fff7fb;
+
+  --shadow-soft: 0 10px 30px -14px rgb(168 18 109 / 0.22);
+
+  --animate-fade-up: fade-up 0.45s ease-out both;
+  --animate-pop-in: pop-in 0.25s ease-out both;
+  --animate-float: float 6s ease-in-out infinite;
+
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+  }
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: scale(0.97);
+    }
+  }
+  @keyframes float {
+    50% {
+      transform: translateY(-8px);
+    }
+  }
+}
+
+@theme inline {
+  --font-sans: var(--font-outfit), "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-display: var(--font-playfair), Georgia, serif;
+}
+
+body {
+  /* Pink and lilac glows in the top corners over a warm white. */
+  background:
+    radial-gradient(1100px 600px at 0% -10%, #ffe1f2 0%, transparent 60%),
+    radial-gradient(900px 520px at 100% -5%, #efe4ff 0%, transparent 55%),
+    #fffafd;
+  background-attachment: fixed;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+@layer base {
+  h1,
+  h2 {
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* Printing a payslip prints only the payslip. */
+@media print {
+  body {
+    background: #ffffff;
+  }
+  body * {
+    visibility: hidden;
+  }
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 100%;
+  }
+  .no-print {
+    display: none !important;
+  }
+}
