@@ -58,6 +58,13 @@ locks the month and shows the payslips to employees. Payslips keep a copy of eve
 figure, so later changes don't rewrite them. To correct a locked month, **Reopen
 month** with a reason, undo the payments that need changing, fix them and pay again.
 
+**Staff portal.** Staff see a home page (leave left, latest pay, earnings this
+year, the next public holiday, HR's notices and their upcoming leave), ask for and
+cancel leave, view and print payslips with year-to-date totals, add a profile
+photo, keep their phone, address, date of birth and emergency contact up to date,
+and manage their guarantors. Bank details stay with HR and are shown masked. HR
+posts notices on the dashboard's **Noticeboard**, which also lists birthdays.
+
 **Records.** Every change (who, what, when) goes in the **Activity** log, which
 can't be edited. **Settings → Download backup** saves all the data as one file:
 do it monthly and after each payroll, as Neon on the free plan can only roll

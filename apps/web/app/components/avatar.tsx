@@ -1,3 +1,7 @@
+"use client";
+
+import { usePhoto } from "../lib/photo";
+
 // Soft tints, picked by name so each person keeps the same colour everywhere.
 const TINTS = [
   "bg-brand-soft text-brand-deep",
@@ -19,17 +23,44 @@ const initialsOf = (name: string) =>
     .map((part) => part[0]!.toUpperCase())
     .join("");
 
-/** A round badge with someone's initials. */
-export default function Avatar({ name, size = "md" }: { name: string; size?: "sm" | "md" | "lg" }) {
-  const dimensions = {
-    sm: "h-8 w-8 text-xs",
-    md: "h-10 w-10 text-sm",
-    lg: "h-14 w-14 text-lg",
-  }[size];
+const SIZES = {
+  sm: "h-8 w-8 text-xs",
+  md: "h-10 w-10 text-sm",
+  lg: "h-14 w-14 text-lg",
+  xl: "h-24 w-24 text-3xl",
+};
+
+/**
+ * Someone's photo, or a round badge with their initials. Pass `employeeId` and
+ * `photoVersion` (from their Employee record) to show their photo.
+ */
+export default function Avatar({
+  name,
+  size = "md",
+  employeeId,
+  photoVersion,
+  className = "",
+}: {
+  name: string;
+  size?: keyof typeof SIZES;
+  employeeId?: string;
+  photoVersion?: string;
+  className?: string;
+}) {
+  const photo = usePhoto(employeeId, photoVersion);
+  if (photo)
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={photo}
+        alt=""
+        className={`shrink-0 rounded-full object-cover ${SIZES[size]} ${className}`}
+      />
+    );
   return (
     <span
       aria-hidden
-      className={`inline-flex shrink-0 items-center justify-center rounded-full font-semibold ${dimensions} ${tintOf(name)}`}
+      className={`inline-flex shrink-0 items-center justify-center rounded-full font-semibold ${SIZES[size]} ${tintOf(name)} ${className}`}
     >
       {initialsOf(name)}
     </span>
@@ -37,10 +68,20 @@ export default function Avatar({ name, size = "md" }: { name: string; size?: "sm
 }
 
 /** A name with its avatar, and an optional second line. */
-export function Person({ name, detail }: { name: string; detail?: string }) {
+export function Person({
+  name,
+  detail,
+  employeeId,
+  photoVersion,
+}: {
+  name: string;
+  detail?: string;
+  employeeId?: string;
+  photoVersion?: string;
+}) {
   return (
     <span className="flex items-center gap-3">
-      <Avatar name={name} />
+      <Avatar name={name} employeeId={employeeId} photoVersion={photoVersion} />
       <span>
         <span className="block whitespace-nowrap font-semibold">{name}</span>
         {detail && <span className="block text-muted">{detail}</span>}

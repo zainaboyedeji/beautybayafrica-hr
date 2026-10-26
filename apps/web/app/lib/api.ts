@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type {
   Activity,
   Admin,
+  Announcement,
   Dashboard,
   Guarantor,
   Department,
@@ -80,6 +81,7 @@ export const fetchMyPayslips = getJson<Payslip[]>("/payslips/mine");
 export const fetchAdmins = getJson<Admin[]>("/admins");
 export const fetchActivity = getJson<Activity[]>("/activity");
 export const fetchHolidays = getJson<PublicHoliday[]>("/holidays");
+export const fetchAnnouncements = getJson<Announcement[]>("/announcements");
 
 /** Saves a file from the API (a CSV, a backup) to the user's computer. */
 export async function downloadFile(path: string, fileName: string, fallback: string) {

@@ -49,6 +49,14 @@ export interface Employee {
   employerPensionPercent: number;
   /** True when NHF (2.5% of basic salary) is taken. */
   nhf: boolean;
+  /** Set when they have a profile photo; changes whenever it does. */
+  photoVersion?: string;
+  dateOfBirth?: Day;
+  homeAddress?: string;
+  /** Who to call in an emergency. */
+  emergencyName?: string;
+  emergencyRelationship?: string;
+  emergencyPhone?: string;
   /** For the PAYE and pension schedules. */
   taxId?: string;
   pensionProvider?: string;
@@ -201,6 +209,16 @@ export interface Admin {
   name: string;
   email: string;
   deactivatedAt?: string;
+  createdAt: string;
+}
+
+/** A notice from HR, shown to everyone in the staff portal. */
+export interface Announcement {
+  id: string;
+  title: string;
+  body: string;
+  /** Who posted it, e.g. "Bola (admin)". */
+  postedBy: string;
   createdAt: string;
 }
 

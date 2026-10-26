@@ -1,11 +1,22 @@
 "use client";
 
 import Link from "next/link";
-import type { Department } from "@hr/types";
+import { useState } from "react";
+import type { Department, Employee } from "@hr/types";
 import Avatar, { Person } from "../components/avatar";
-import { CARD } from "../components/form-styles";
+import { CARD, INPUT, PRIMARY_BUTTON } from "../components/form-styles";
 import Icon, { type IconName } from "../components/icons";
-import { fetchDashboard, fetchDepartments, fetchLeave, money, useLoad } from "../lib/api";
+import {
+  apiSend,
+  describeError,
+  fetchAnnouncements,
+  fetchDashboard,
+  fetchDepartments,
+  fetchEmployees,
+  fetchLeave,
+  money,
+  useLoad,
+} from "../lib/api";
 import { formatDay, formatDays, formatPeriod, LEAVE_LABELS } from "../lib/format";
 import { LoadError, Loading } from "../lib/status";
 
@@ -150,8 +161,152 @@ export default function DashboardPage() {
             Go to payroll →
           </Link>
         </section>
+
+        <Noticeboard />
+        <Birthdays />
       </div>
     </div>
+  );
+}
+
+/** HR's notices, which every employee sees on their staff portal home. */
+function Noticeboard() {
+  const notices = useLoad(fetchAnnouncements);
+  const [form, setForm] = useState({ title: "", body: "" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async (work: () => Promise<unknown>, fallback: string) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await work();
+      await notices.reload();
+      return true;
+    } catch (e) {
+      setError(describeError(e, fallback));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className={`${CARD} lg:col-span-2`}>
+      <CardTitle icon="megaphone" tint="bg-brand-soft text-brand-deep" title="Noticeboard" />
+      <p className="mt-1 text-sm text-muted">Everyone sees these on their staff portal home.</p>
+      <form
+        className="mt-4 flex flex-col gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void run(() => apiSend("/announcements", "POST", form, "Could not post"), "Could not post").then(
+            (ok) => ok && setForm({ title: "", body: "" }),
+          );
+        }}
+      >
+        <input
+          required
+          maxLength={120}
+          placeholder="Title, e.g. Office closed on Friday"
+          value={form.title}
+          onChange={(e) => setForm({ ...form, title: e.target.value })}
+          className={INPUT}
+        />
+        <textarea
+          required
+          rows={3}
+          maxLength={2000}
+          placeholder="The message for all staff"
+          value={form.body}
+          onChange={(e) => setForm({ ...form, body: e.target.value })}
+          className={INPUT}
+        />
+        {error && <p className="text-sm text-red-700">{error}</p>}
+        <button type="submit" disabled={saving} className={`${PRIMARY_BUTTON} self-end`}>
+          <Icon name="megaphone" className="h-4 w-4" />
+          {saving ? "Posting…" : "Post notice"}
+        </button>
+      </form>
+      {notices.failed ? (
+        <LoadError />
+      ) : !notices.data ? (
+        <Loading />
+      ) : notices.data.length === 0 ? (
+        <Empty text="No notices yet." />
+      ) : (
+        <ul className="mt-4 divide-y divide-line">
+          {notices.data.map((n) => (
+            <li key={n.id} className="flex items-start justify-between gap-3 py-3 text-sm">
+              <span className="min-w-0">
+                <span className="block font-semibold">{n.title}</span>
+                <span className="block whitespace-pre-line">{n.body}</span>
+                <span className="mt-1 block text-xs text-muted">
+                  {n.postedBy} · {formatDay(new Date(n.createdAt).toLocaleDateString("en-CA"))}
+                </span>
+              </span>
+              <button
+                disabled={saving}
+                onClick={() =>
+                  void run(
+                    () => apiSend(`/announcements/${n.id}`, "DELETE", undefined, "Could not take it down"),
+                    "Could not take it down",
+                  )
+                }
+                className="shrink-0 font-medium text-red-700 hover:underline"
+              >
+                Take down
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** Birthdays this month, from the dates of birth staff and HR have entered. */
+function Birthdays() {
+  const employees = useLoad(fetchEmployees);
+  const month = new Date().getMonth() + 1;
+  const todayDay = new Date().getDate();
+  const current = (e: Employee) => !e.endDate || e.endDate >= new Date().toLocaleDateString("en-CA");
+  const birthdays = (employees.data ?? [])
+    .filter((e) => current(e) && e.dateOfBirth && Number(e.dateOfBirth.slice(5, 7)) === month)
+    .sort((a, b) => a.dateOfBirth!.slice(8).localeCompare(b.dateOfBirth!.slice(8)));
+
+  return (
+    <section className={`${CARD} bg-gradient-to-br from-white to-rose-50`}>
+      <CardTitle icon="sparkle" tint="bg-rose-100 text-rose-700" title="Birthdays this month" />
+      {employees.failed ? (
+        <LoadError />
+      ) : !employees.data ? (
+        <Loading />
+      ) : birthdays.length === 0 ? (
+        <Empty text="No birthdays this month (or no dates of birth entered yet)." />
+      ) : (
+        <ul className="mt-4 flex flex-col gap-3 text-sm">
+          {birthdays.map((e) => {
+            const day = Number(e.dateOfBirth!.slice(8));
+            return (
+              <li key={e.id} className="flex items-center gap-3">
+                <Avatar name={e.name} employeeId={e.id} photoVersion={e.photoVersion} />
+                <span className="flex-1">
+                  <span className="block font-semibold">{e.name}</span>
+                  <span className="block text-muted">
+                    {new Date(2000, month - 1, day).toLocaleDateString("en-NG", { day: "numeric", month: "long" })}
+                  </span>
+                </span>
+                {day === todayDay && (
+                  <span className="rounded-full bg-rose-100 px-2.5 py-0.5 text-xs font-semibold text-rose-700">
+                    Today!
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
   );
 }
 

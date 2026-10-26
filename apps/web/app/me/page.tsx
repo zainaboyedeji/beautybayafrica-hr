@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import type { LeaveRequest, Payslip } from "@hr/types";
+import { useState, type ReactNode } from "react";
+import type { LeaveRequest, MyProfile, Payslip } from "@hr/types";
+import Avatar from "../components/avatar";
 import ConfirmDialog from "../components/confirm-dialog";
 import Guarantors from "../components/guarantors";
 import {
@@ -19,10 +20,13 @@ import LeaveForm from "../components/leave-form";
 import Modal from "../components/modal";
 import { Notice } from "../components/notice";
 import PayslipView from "../components/payslip-view";
+import PhotoPicker from "../components/photo-picker";
 import StatusBadge from "../components/status-badge";
 import {
   apiSend,
   describeError,
+  fetchAnnouncements,
+  fetchHolidays,
   fetchMe,
   fetchMyLeave,
   fetchMyPayslips,
@@ -30,16 +34,47 @@ import {
   useLoad,
 } from "../lib/api";
 import { logOut, saveSession, type Session } from "../lib/auth";
-import { formatDay, formatDays, formatPeriod, LEAVE_LABELS } from "../lib/format";
+import {
+  EMPLOYMENT_LABELS,
+  formatDay,
+  formatDays,
+  formatPeriod,
+  LEAVE_LABELS,
+  today,
+} from "../lib/format";
 import { LoadError, Loading } from "../lib/status";
+
+type Tab = "home" | "leave" | "pay" | "profile";
+const TABS: { key: Tab; label: string; icon: IconName }[] = [
+  { key: "home", label: "Home", icon: "home" },
+  { key: "leave", label: "Leave", icon: "calendar" },
+  { key: "pay", label: "Payslips", icon: "wallet" },
+  { key: "profile", label: "My profile", icon: "user" },
+];
+
+const greeting = () => {
+  const hour = new Date().getHours();
+  return hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+};
+
+/** Whole days from today to `day`. */
+const daysUntil = (day: string) =>
+  Math.round((Date.parse(`${day}T00:00:00Z`) - Date.parse(`${today()}T00:00:00Z`)) / 86_400_000);
+
+const deductionOf = (p: Payslip, prefix: string) =>
+  p.deductions.find((d) => d.name.startsWith(prefix))?.amount ?? 0;
 
 export default function MyPortalPage() {
   const me = useLoad(fetchMe);
   const leave = useLoad(fetchMyLeave);
   const payslips = useLoad(fetchMyPayslips);
+  const holidays = useLoad(fetchHolidays);
+  const notices = useLoad(fetchAnnouncements);
+  const [tab, setTab] = useState<Tab>("home");
   const [asking, setAsking] = useState(false);
   const [cancelling, setCancelling] = useState<LeaveRequest | null>(null);
   const [viewing, setViewing] = useState<Payslip | null>(null);
+  const [editing, setEditing] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,6 +92,13 @@ export default function MyPortalPage() {
   };
 
   const profile = me.data;
+  const day = today();
+  const upcomingHolidays = (holidays.data ?? []).filter((h) => h.day >= day);
+  const upcomingLeave = (leave.data ?? [])
+    .filter((l) => l.endDate >= day && (l.status === "approved" || l.status === "pending"))
+    .sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const thisYear = (payslips.data ?? []).filter((p) => p.period.startsWith(day.slice(0, 4)));
+  const sum = (pick: (p: Payslip) => number) => thisYear.reduce((s, p) => s + pick(p), 0);
 
   return (
     <div className="min-h-screen text-ink">
@@ -68,13 +110,20 @@ export default function MyPortalPage() {
             <span className="font-display text-lg font-semibold">Staff portal</span>
           </div>
           <div className="flex items-center gap-1 text-sm font-semibold">
-            <button
-              onClick={() => setChangingPassword(true)}
-              className="inline-flex items-center gap-2 rounded-full px-3.5 py-2 text-muted transition hover:bg-surface-alt hover:text-ink"
-            >
-              <Icon name="key" className="h-4 w-4" />
-              <span className="hidden sm:inline">Change password</span>
-            </button>
+            {profile && (
+              <button
+                onClick={() => setTab("profile")}
+                className="flex items-center gap-2 rounded-full py-1 pl-1 pr-3 transition hover:bg-surface-alt"
+              >
+                <Avatar
+                  name={profile.name}
+                  size="sm"
+                  employeeId={profile.id}
+                  photoVersion={profile.photoVersion}
+                />
+                <span className="hidden sm:inline">{profile.name.split(" ")[0]}</span>
+              </button>
+            )}
             <button
               onClick={logOut}
               className="inline-flex items-center gap-2 rounded-full px-3.5 py-2 text-muted transition hover:bg-surface-alt hover:text-ink"
@@ -94,20 +143,22 @@ export default function MyPortalPage() {
         ) : (
           <>
             {/* Text sits on the deep end of the gradient, where white reads well. */}
-            <section className="relative mt-2 overflow-hidden rounded-[2rem] bg-gradient-to-br from-brand-deep via-brand-hover to-brand p-8 text-white shadow-xl shadow-brand/30">
+            <section className="relative mt-2 overflow-hidden rounded-[2rem] bg-gradient-to-br from-brand-deep via-brand-hover to-brand p-6 text-white shadow-xl shadow-brand/30 sm:p-8">
               <div aria-hidden className="absolute -right-12 -top-16 h-60 w-60 animate-float rounded-full bg-white/15" />
               <div aria-hidden className="absolute -bottom-24 right-32 h-48 w-48 animate-float rounded-full bg-violet-300/25 [animation-delay:-3s]" />
               <div className="relative flex flex-wrap items-center gap-5">
-                <span className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-xl font-semibold text-brand-deep shadow-lg">
-                  {profile.name
-                    .split(/\s+/)
-                    .slice(0, 2)
-                    .map((p) => p[0])
-                    .join("")
-                    .toUpperCase()}
-                </span>
-                <div>
-                  <h1 className="text-4xl font-semibold">Hello, {profile.name.split(" ")[0]}!</h1>
+                <PhotoPicker
+                  light
+                  employee={profile}
+                  path="/me/photo"
+                  onChanged={() => {
+                    setNotice("Photo saved.");
+                    void me.reload();
+                  }}
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-white/85">{greeting()},</p>
+                  <h1 className="text-4xl font-semibold">{profile.name.split(" ")[0]}!</h1>
                   <p className="mt-1 text-white/90">
                     {profile.jobTitle}
                     {profile.departmentName && ` · ${profile.departmentName}`} · {profile.employeeNo}
@@ -115,47 +166,80 @@ export default function MyPortalPage() {
                 </div>
                 <button
                   onClick={() => setAsking(true)}
-                  className="ml-auto inline-flex items-center gap-2 rounded-full bg-white px-5 py-3 text-sm font-semibold text-brand-deep shadow-md transition hover:-translate-y-0.5"
+                  className="inline-flex items-center gap-2 rounded-full bg-white px-5 py-3 text-sm font-semibold text-brand-deep shadow-md transition hover:-translate-y-0.5"
                 >
                   <Icon name="plus" className="h-4 w-4" />
                   Ask for leave
                 </button>
               </div>
             </section>
+
+            <nav
+              role="tablist"
+              aria-label="Sections"
+              className="no-print mt-5 grid grid-cols-4 gap-1 rounded-full bg-white/85 p-1 text-sm font-semibold shadow-soft ring-1 ring-line"
+            >
+              {TABS.map((t) => (
+                <button
+                  key={t.key}
+                  role="tab"
+                  aria-selected={tab === t.key}
+                  onClick={() => setTab(t.key)}
+                  className={`flex items-center justify-center gap-2 rounded-full py-2.5 transition ${
+                    tab === t.key
+                      ? "bg-gradient-to-r from-brand to-brand-hover text-ink shadow-md shadow-brand/30"
+                      : "text-muted hover:text-ink"
+                  }`}
+                >
+                  <Icon name={t.icon} className="h-4 w-4" />
+                  <span className="hidden sm:inline">{t.label}</span>
+                </button>
+              ))}
+            </nav>
             <Notice text={notice} />
             {error && <p className="mt-3 text-sm text-red-700">{error}</p>}
 
-            <div className="mt-6 grid gap-4 sm:grid-cols-2">
-              <div className={CARD}>
-                <Heading icon="calendar" tint="bg-amber-100 text-amber-800" title="Annual leave left" />
-                <p className="mt-4 text-4xl font-semibold">
-                  {profile.annualLeaveLeft}
-                  <span className="text-lg font-normal text-muted"> of {profile.annualLeaveDays} days</span>
-                </p>
-                <div aria-hidden className="mt-3 h-2.5 overflow-hidden rounded-full bg-brand-soft/60">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-brand to-brand-hover"
-                    style={{
-                      width: `${profile.annualLeaveDays ? Math.max(0, (profile.annualLeaveLeft / profile.annualLeaveDays) * 100) : 0}%`,
-                    }}
-                  />
-                </div>
-                <p className="mt-2 text-xs text-muted">
-                  {formatDays(profile.annualLeaveTaken)} used this year
-                </p>
-              </div>
-              <div className={`${CARD} bg-gradient-to-br from-white to-emerald-50`}>
-                <Heading icon="wallet" tint="bg-emerald-100 text-emerald-800" title="Latest pay" />
-                <p className="mt-4 text-4xl font-semibold">
-                  {payslips.data?.[0] ? money.format(payslips.data[0].net) : "—"}
-                </p>
-                <p className="mt-2 text-xs text-muted">
-                  {payslips.data?.[0]
-                    ? `Net pay for ${formatPeriod(payslips.data[0].period)}`
-                    : "No payslips yet"}
-                </p>
-              </div>
-            </div>
+            {tab === "home" && (
+              <HomeTab
+                profile={profile}
+                latest={payslips.data?.[0]}
+                earnedThisYear={sum((p) => p.net)}
+                nextHoliday={upcomingHolidays[0]}
+                upcomingLeave={upcomingLeave.slice(0, 3)}
+                notices={notices}
+                onViewPayslip={setViewing}
+                onGo={setTab}
+              />
+            )}
+            {tab === "leave" && (
+              <LeaveTab
+                profile={profile}
+                leave={leave}
+                holidays={upcomingHolidays}
+                onAsk={() => setAsking(true)}
+                onCancel={setCancelling}
+              />
+            )}
+            {tab === "pay" && (
+              <PayTab
+                payslips={payslips}
+                totals={{
+                  gross: sum((p) => p.gross),
+                  paye: sum((p) => deductionOf(p, "PAYE")),
+                  pension: sum((p) => deductionOf(p, "Pension")),
+                  net: sum((p) => p.net),
+                  count: thisYear.length,
+                }}
+                onView={setViewing}
+              />
+            )}
+            {tab === "profile" && (
+              <ProfileTab
+                profile={profile}
+                onEdit={() => setEditing(true)}
+                onChangePassword={() => setChangingPassword(true)}
+              />
+            )}
           </>
         )}
 
@@ -165,6 +249,7 @@ export default function MyPortalPage() {
               onCancel={() => setAsking(false)}
               onSaved={() => {
                 setAsking(false);
+                setTab("leave");
                 setNotice("Leave request sent. You'll see the decision here.");
                 void leave.reload();
               }}
@@ -187,9 +272,22 @@ export default function MyPortalPage() {
             <div className="no-print mt-5 flex justify-end">
               <button onClick={() => window.print()} className={SECONDARY_BUTTON}>
                 <Icon name="printer" className="h-4 w-4" />
-                Print
+                Print or save as PDF
               </button>
             </div>
+          </Modal>
+        )}
+        {editing && profile && (
+          <Modal title="My details" onClose={() => setEditing(false)}>
+            <DetailsForm
+              profile={profile}
+              onCancel={() => setEditing(false)}
+              onSaved={() => {
+                setEditing(false);
+                setNotice("Your details are saved.");
+                void me.reload();
+              }}
+            />
           </Modal>
         )}
         {changingPassword && (
@@ -198,23 +296,211 @@ export default function MyPortalPage() {
               onCancel={() => setChangingPassword(false)}
               onSaved={() => {
                 setChangingPassword(false);
-                setNotice("Password changed.");
+                setNotice("Password changed. You've been logged out on any other devices.");
               }}
             />
           </Modal>
         )}
+      </main>
+    </div>
+  );
+}
 
-        <section className="mt-8">
-          <Heading icon="calendar" tint="bg-amber-100 text-amber-800" title="My leave" />
-          <div className="mt-4">
-            {leave.failed ? (
+type Loaded<T> = { data: T | null; failed: boolean };
+
+// --- Home -------------------------------------------------------------------
+
+function HomeTab({
+  profile,
+  latest,
+  earnedThisYear,
+  nextHoliday,
+  upcomingLeave,
+  notices,
+  onViewPayslip,
+  onGo,
+}: {
+  profile: MyProfile;
+  latest?: Payslip;
+  earnedThisYear: number;
+  nextHoliday?: { day: string; name: string };
+  upcomingLeave: LeaveRequest[];
+  notices: Loaded<{ id: string; title: string; body: string; postedBy: string; createdAt: string }[]>;
+  onViewPayslip: (p: Payslip) => void;
+  onGo: (tab: Tab) => void;
+}) {
+  const missing = [
+    !profile.photoVersion && "a photo",
+    !profile.phone && "your phone number",
+    !profile.emergencyName && "an emergency contact",
+    profile.guarantors === 0 && "a guarantor",
+  ].filter(Boolean) as string[];
+  const holidayIn = nextHoliday ? daysUntil(nextHoliday.day) : 0;
+
+  return (
+    <div className="mt-6 flex flex-col gap-6">
+      {missing.length > 0 && (
+        <button
+          onClick={() => onGo("profile")}
+          className="flex items-center gap-4 rounded-3xl bg-amber-50 p-4 text-left text-sm ring-1 ring-amber-200 transition hover:-translate-y-0.5"
+        >
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-800">
+            <Icon name="sparkle" />
+          </span>
+          <span className="flex-1">
+            <span className="block font-semibold text-amber-900">Finish your profile</span>
+            <span className="block text-amber-800">
+              Add {missing.length > 1 ? `${missing.slice(0, -1).join(", ")} and ${missing.at(-1)}` : missing[0]}.
+            </span>
+          </span>
+          <span className="font-semibold text-amber-900">Go →</span>
+        </button>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className={CARD}>
+          <Heading icon="calendar" tint="bg-amber-100 text-amber-800" title="Leave left" small />
+          <p className="mt-3 text-3xl font-semibold">
+            {profile.annualLeaveLeft}
+            <span className="text-base font-normal text-muted"> of {profile.annualLeaveDays}</span>
+          </p>
+          <div aria-hidden className="mt-3 h-2 overflow-hidden rounded-full bg-brand-soft/60">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-brand to-brand-hover"
+              style={{
+                width: `${profile.annualLeaveDays ? Math.max(0, (profile.annualLeaveLeft / profile.annualLeaveDays) * 100) : 0}%`,
+              }}
+            />
+          </div>
+          <p className="mt-2 text-xs text-muted">{formatDays(profile.annualLeaveTaken)} used this year</p>
+        </div>
+        <button
+          disabled={!latest}
+          onClick={() => latest && onViewPayslip(latest)}
+          className={`${CARD} bg-gradient-to-br from-white to-emerald-50 text-left transition enabled:hover:-translate-y-0.5`}
+        >
+          <Heading icon="wallet" tint="bg-emerald-100 text-emerald-800" title="Latest pay" small />
+          <p className="mt-3 text-3xl font-semibold">{latest ? money.format(latest.net) : "—"}</p>
+          <p className="mt-2 text-xs text-muted">
+            {latest ? `${formatPeriod(latest.period)} · tap to view` : "No payslips yet"}
+          </p>
+        </button>
+        <div className={CARD}>
+          <Heading icon="sparkle" tint="bg-violet-100 text-violet-700" title="Earned this year" small />
+          <p className="mt-3 text-3xl font-semibold">{money.format(earnedThisYear)}</p>
+          <p className="mt-2 text-xs text-muted">Net pay, {today().slice(0, 4)}</p>
+        </div>
+        <div className={CARD}>
+          <Heading icon="sun" tint="bg-sky-100 text-sky-800" title="Next holiday" small />
+          {nextHoliday ? (
+            <>
+              <p className="mt-3 text-xl font-semibold leading-tight">{nextHoliday.name}</p>
+              <p className="mt-2 text-xs text-muted">
+                {formatDay(nextHoliday.day)} ·{" "}
+                {holidayIn === 0 ? "today" : holidayIn === 1 ? "tomorrow" : `in ${holidayIn} days`}
+              </p>
+            </>
+          ) : (
+            <p className="mt-3 text-sm text-muted">None listed yet</p>
+          )}
+        </div>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
+        <section>
+          <Heading icon="megaphone" tint="bg-brand-soft text-brand-deep" title="From HR" />
+          <div className="mt-4 flex flex-col gap-3">
+            {notices.failed ? (
               <LoadError />
-            ) : !leave.data ? (
+            ) : !notices.data ? (
               <Loading />
-            ) : leave.data.length === 0 ? (
-              <p className="text-sm text-muted">You haven&apos;t asked for leave yet.</p>
+            ) : notices.data.length === 0 ? (
+              <p className={`${CARD} text-sm text-muted`}>No notices from HR right now.</p>
             ) : (
-              <div className={TABLE_CARD}><table className={TABLE}>
+              notices.data.map((n) => (
+                <article key={n.id} className={CARD}>
+                  <h3 className="font-semibold">{n.title}</h3>
+                  <p className="mt-2 whitespace-pre-line text-sm">{n.body}</p>
+                  <p className="mt-3 text-xs text-muted">
+                    {n.postedBy} · {formatDay(new Date(n.createdAt).toLocaleDateString("en-CA"))}
+                  </p>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+        <section>
+          <Heading icon="calendar" tint="bg-amber-100 text-amber-800" title="Coming up" />
+          <div className={`${CARD} mt-4`}>
+            {upcomingLeave.length === 0 ? (
+              <p className="text-sm text-muted">No leave booked. Enjoy the work!</p>
+            ) : (
+              <ul className="flex flex-col gap-3 text-sm">
+                {upcomingLeave.map((l) => (
+                  <li key={l.id} className="flex items-start justify-between gap-3">
+                    <span>
+                      <span className="block font-medium">{LEAVE_LABELS[l.type]}</span>
+                      <span className="block text-muted">
+                        {formatDay(l.startDate)} – {formatDay(l.endDate)} · {formatDays(l.days)}
+                      </span>
+                    </span>
+                    <StatusBadge status={l.status} />
+                  </li>
+                ))}
+              </ul>
+            )}
+            <button
+              onClick={() => onGo("leave")}
+              className="mt-4 text-sm font-semibold text-brand-deep hover:underline"
+            >
+              All my leave →
+            </button>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+// --- Leave ------------------------------------------------------------------
+
+function LeaveTab({
+  profile,
+  leave,
+  holidays,
+  onAsk,
+  onCancel,
+}: {
+  profile: MyProfile;
+  leave: Loaded<LeaveRequest[]>;
+  holidays: { day: string; name: string }[];
+  onAsk: () => void;
+  onCancel: (l: LeaveRequest) => void;
+}) {
+  return (
+    <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_18rem]">
+      <section className="min-w-0">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <Heading icon="calendar" tint="bg-amber-100 text-amber-800" title="My leave" />
+          <button onClick={onAsk} className={PRIMARY_BUTTON}>
+            <Icon name="plus" className="h-4 w-4" />
+            Ask for leave
+          </button>
+        </div>
+        <p className="mt-2 text-sm text-muted">
+          {profile.annualLeaveLeft} of {profile.annualLeaveDays} days of annual leave left this
+          year. Weekends and public holidays don&apos;t count.
+        </p>
+        <div className="mt-4">
+          {leave.failed ? (
+            <LoadError />
+          ) : !leave.data ? (
+            <Loading />
+          ) : leave.data.length === 0 ? (
+            <p className="text-sm text-muted">You haven&apos;t asked for leave yet.</p>
+          ) : (
+            <div className={TABLE_CARD}>
+              <table className={TABLE}>
                 <thead className={THEAD}>
                   <tr>
                     <th className="px-5 py-3.5">Leave</th>
@@ -241,7 +527,7 @@ export default function MyPortalPage() {
                       <td className="px-5 py-4 text-right">
                         {l.status === "pending" && (
                           <button
-                            onClick={() => setCancelling(l)}
+                            onClick={() => onCancel(l)}
                             className="font-medium text-red-700 hover:underline"
                           >
                             Cancel
@@ -251,63 +537,314 @@ export default function MyPortalPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table></div>
-            )}
-          </div>
-        </section>
-
-        <section className="mt-8">
-          <Heading icon="users" tint="bg-violet-100 text-violet-700" title="My guarantors" />
-          <p className="mt-1 text-sm text-muted">
-            People who can vouch for you. HR checks each one and marks them verified.
-          </p>
-          <div className="mt-4">
-            <Guarantors path="/me/guarantors" isAdmin={false} />
-          </div>
-        </section>
-
-        <section className="mt-8">
-          <Heading icon="wallet" tint="bg-emerald-100 text-emerald-800" title="My payslips" />
-          <div className="mt-4">
-            {payslips.failed ? (
-              <LoadError />
-            ) : !payslips.data ? (
-              <Loading />
-            ) : payslips.data.length === 0 ? (
-              <p className="text-sm text-muted">
-                Your payslips show here once each month&apos;s salary is paid.
-              </p>
-            ) : (
-              <ul className="grid gap-3 sm:grid-cols-2">
-                {payslips.data.map((p) => (
-                  <li key={p.period}>
-                    <button
-                      onClick={() => setViewing(p)}
-                      className="group flex w-full items-center gap-4 rounded-3xl bg-white p-4 text-left text-sm shadow-soft ring-1 ring-line transition hover:-translate-y-0.5 hover:ring-brand-soft"
-                    >
-                      <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-800">
-                        <Icon name="wallet" />
-                      </span>
-                      <span className="flex-1">
-                        <span className="block font-semibold">{formatPeriod(p.period)}</span>
-                        <span className="block text-muted">{money.format(p.net)} net</span>
-                      </span>
-                      <span className="font-semibold text-brand-deep group-hover:underline">View →</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </section>
-      </main>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
+      <aside>
+        <Heading icon="sun" tint="bg-sky-100 text-sky-800" title="Public holidays" />
+        <div className={`${CARD} mt-4`}>
+          {holidays.length === 0 ? (
+            <p className="text-sm text-muted">None listed yet.</p>
+          ) : (
+            <ul className="flex flex-col gap-2.5 text-sm">
+              {holidays.slice(0, 8).map((h) => (
+                <li key={h.day} className="flex justify-between gap-3">
+                  <span className="font-medium">{h.name}</span>
+                  <span className="whitespace-nowrap text-muted">{formatDay(h.day)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </aside>
     </div>
   );
 }
 
-function Heading({ icon, tint, title }: { icon: IconName; tint: string; title: string }) {
+// --- Payslips ---------------------------------------------------------------
+
+function PayTab({
+  payslips,
+  totals,
+  onView,
+}: {
+  payslips: Loaded<Payslip[]>;
+  totals: { gross: number; paye: number; pension: number; net: number; count: number };
+  onView: (p: Payslip) => void;
+}) {
+  const year = today().slice(0, 4);
   return (
-    <h2 className="flex items-center gap-3 text-xl font-semibold">
+    <div className="mt-6 flex flex-col gap-6">
+      {totals.count > 0 && (
+        <section className={CARD}>
+          <Heading icon="sparkle" tint="bg-violet-100 text-violet-700" title={`${year} so far`} small />
+          <dl className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Figure label="Gross pay" value={money.format(totals.gross)} />
+            <Figure label="PAYE tax" value={money.format(totals.paye)} />
+            <Figure label="Pension" value={money.format(totals.pension)} />
+            <Figure label="Net pay" value={money.format(totals.net)} strong />
+          </dl>
+          <p className="mt-3 text-xs text-muted">
+            From {totals.count} payslip{totals.count === 1 ? "" : "s"} this year.
+          </p>
+        </section>
+      )}
+      <section>
+        <Heading icon="wallet" tint="bg-emerald-100 text-emerald-800" title="My payslips" />
+        <div className="mt-4">
+          {payslips.failed ? (
+            <LoadError />
+          ) : !payslips.data ? (
+            <Loading />
+          ) : payslips.data.length === 0 ? (
+            <p className="text-sm text-muted">
+              Your payslips show here once each month&apos;s salary is paid.
+            </p>
+          ) : (
+            <ul className="grid gap-3 sm:grid-cols-2">
+              {payslips.data.map((p) => (
+                <li key={p.period}>
+                  <button
+                    onClick={() => onView(p)}
+                    className="group flex w-full items-center gap-4 rounded-3xl bg-white p-4 text-left text-sm shadow-soft ring-1 ring-line transition hover:-translate-y-0.5 hover:ring-brand-soft"
+                  >
+                    <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-800">
+                      <Icon name="wallet" />
+                    </span>
+                    <span className="flex-1">
+                      <span className="block font-semibold">{formatPeriod(p.period)}</span>
+                      <span className="block text-muted">
+                        {money.format(p.net)} net · {money.format(p.gross)} gross
+                      </span>
+                    </span>
+                    <span className="font-semibold text-brand-deep group-hover:underline">View →</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Figure({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+  return (
+    <div>
+      <dt className="text-xs font-semibold uppercase tracking-wide text-muted">{label}</dt>
+      <dd className={`mt-1 ${strong ? "text-2xl font-semibold text-brand-deep" : "text-lg font-semibold"}`}>
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+// --- Profile ----------------------------------------------------------------
+
+/** "••••6789": enough to recognise the account, not enough to misuse it. */
+const masked = (account?: string) => (account ? `••••${account.slice(-4)}` : "Not given");
+
+function ProfileTab({
+  profile,
+  onEdit,
+  onChangePassword,
+}: {
+  profile: MyProfile;
+  onEdit: () => void;
+  onChangePassword: () => void;
+}) {
+  return (
+    <div className="mt-6 flex flex-col gap-6">
+      <div className="grid gap-6 lg:grid-cols-2">
+        <section className={CARD}>
+          <div className="flex items-center justify-between gap-3">
+            <Heading icon="user" tint="bg-brand-soft text-brand-deep" title="My details" small />
+            <button onClick={onEdit} className={SECONDARY_BUTTON}>
+              <Icon name="pencil" className="h-4 w-4" />
+              Edit
+            </button>
+          </div>
+          <dl className="mt-4 divide-y divide-line text-sm">
+            <Row label="Work email" value={profile.email} />
+            <Row label="Phone" value={profile.phone} />
+            <Row label="Date of birth" value={profile.dateOfBirth && formatDay(profile.dateOfBirth)} />
+            <Row label="Home address" value={profile.homeAddress} />
+            <Row
+              label="Emergency contact"
+              value={
+                profile.emergencyName &&
+                [
+                  profile.emergencyName,
+                  profile.emergencyRelationship && `(${profile.emergencyRelationship})`,
+                  profile.emergencyPhone && `· ${profile.emergencyPhone}`,
+                ]
+                  .filter(Boolean)
+                  .join(" ")
+              }
+            />
+          </dl>
+        </section>
+        <section className={CARD}>
+          <Heading icon="building" tint="bg-sky-100 text-sky-800" title="My job" small />
+          <dl className="mt-4 divide-y divide-line text-sm">
+            <Row label="Staff number" value={profile.employeeNo} />
+            <Row label="Job" value={profile.jobTitle} />
+            <Row label="Department" value={profile.departmentName} />
+            <Row label="Employment" value={EMPLOYMENT_LABELS[profile.employmentType]} />
+            <Row label="Started" value={formatDay(profile.startDate)} />
+            <Row
+              label="Salary paid to"
+              value={`${profile.bankName ?? "Bank not given"} ${masked(profile.bankAccountNumber)}`}
+            />
+          </dl>
+          <p className="mt-3 text-xs text-muted">
+            To change your job details or bank account, speak to HR. Bank changes are only made
+            by HR, to keep your salary safe.
+          </p>
+        </section>
+      </div>
+
+      <section>
+        <Heading icon="users" tint="bg-violet-100 text-violet-700" title="My guarantors" />
+        <p className="mt-1 text-sm text-muted">
+          People who can vouch for you. HR checks each one and marks them verified.
+        </p>
+        <div className="mt-4">
+          <Guarantors path="/me/guarantors" isAdmin={false} />
+        </div>
+      </section>
+
+      <section className={`${CARD} flex flex-wrap items-center justify-between gap-3`}>
+        <div>
+          <Heading icon="key" tint="bg-slate-100 text-slate-700" title="Password" small />
+          <p className="mt-1 text-sm text-muted">
+            Changing it logs you out on any other phone or computer.
+          </p>
+        </div>
+        <button onClick={onChangePassword} className={SECONDARY_BUTTON}>
+          Change password
+        </button>
+      </section>
+    </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value?: ReactNode }) {
+  return (
+    <div className="flex justify-between gap-4 py-2.5">
+      <dt className="text-muted">{label}</dt>
+      <dd className={`text-right font-medium ${value ? "" : "font-normal text-muted"}`}>
+        {value || "Not given"}
+      </dd>
+    </div>
+  );
+}
+
+function DetailsForm({
+  profile,
+  onSaved,
+  onCancel,
+}: {
+  profile: MyProfile;
+  onSaved: () => void;
+  onCancel: () => void;
+}) {
+  const [form, setForm] = useState({
+    phone: profile.phone ?? "",
+    dateOfBirth: profile.dateOfBirth ?? "",
+    homeAddress: profile.homeAddress ?? "",
+    emergencyName: profile.emergencyName ?? "",
+    emergencyRelationship: profile.emergencyRelationship ?? "",
+    emergencyPhone: profile.emergencyPhone ?? "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const field = (key: keyof typeof form) => ({
+    value: form[key],
+    onChange: (e: { target: { value: string } }) => setForm({ ...form, [key]: e.target.value }),
+    className: INPUT,
+  });
+
+  const submit = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await apiSend("/me/details", "PUT", form, "Could not save your details");
+      onSaved();
+    } catch (e) {
+      setError(describeError(e, "Could not save your details"));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form
+      className="flex flex-col gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="text-sm font-medium">
+          Phone
+          <input autoFocus type="tel" {...field("phone")} />
+        </label>
+        <label className="text-sm font-medium">
+          Date of birth
+          <input type="date" max={today()} {...field("dateOfBirth")} />
+        </label>
+      </div>
+      <label className="text-sm font-medium">
+        Home address
+        <textarea rows={2} {...field("homeAddress")} />
+      </label>
+      <p className="mt-2 text-sm font-semibold">
+        Emergency contact <span className="font-normal text-muted">(who HR calls if something happens)</span>
+      </p>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <label className="text-sm font-medium">
+          Name
+          <input {...field("emergencyName")} />
+        </label>
+        <label className="text-sm font-medium">
+          Relationship
+          <input placeholder="e.g. Sister" {...field("emergencyRelationship")} />
+        </label>
+        <label className="text-sm font-medium">
+          Phone
+          <input type="tel" {...field("emergencyPhone")} />
+        </label>
+      </div>
+      {error && <p className="text-sm text-red-700">{error}</p>}
+      <div className="mt-2 flex justify-end gap-3">
+        <button type="button" onClick={onCancel} className={SECONDARY_BUTTON}>
+          Cancel
+        </button>
+        <button type="submit" disabled={saving} className={PRIMARY_BUTTON}>
+          {saving ? "Saving…" : "Save details"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function Heading({
+  icon,
+  tint,
+  title,
+  small,
+}: {
+  icon: IconName;
+  tint: string;
+  title: string;
+  small?: boolean;
+}) {
+  return (
+    <h2 className={`flex items-center gap-3 font-semibold ${small ? "text-base" : "text-xl"}`}>
       <span className={`flex h-9 w-9 items-center justify-center rounded-xl ${tint}`}>
         <Icon name={icon} className="h-[18px] w-[18px]" />
       </span>

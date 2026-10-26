@@ -33,6 +33,7 @@ import { randomUUID } from "node:crypto";
 import type {
   Activity,
   Admin,
+  Announcement,
   Dashboard,
   Guarantor,
   Day,
@@ -150,6 +151,12 @@ type EmployeeRow = {
   tax_id: string | null;
   pension_provider: string | null;
   pension_pin: string | null;
+  date_of_birth: Day | null;
+  home_address: string | null;
+  emergency_name: string | null;
+  emergency_relationship: string | null;
+  emergency_phone: string | null;
+  photo_updated_at?: Date | null;
   bank_name: string | null;
   bank_account_number: string | null;
   bank_account_name: string | null;
@@ -191,6 +198,14 @@ const toEmployee = (row: EmployeeRow): Employee => ({
   ...(row.tax_id !== null ? { taxId: row.tax_id } : {}),
   ...(row.pension_provider !== null ? { pensionProvider: row.pension_provider } : {}),
   ...(row.pension_pin !== null ? { pensionPin: row.pension_pin } : {}),
+  ...(row.photo_updated_at ? { photoVersion: row.photo_updated_at.toISOString() } : {}),
+  ...(row.date_of_birth !== null ? { dateOfBirth: row.date_of_birth } : {}),
+  ...(row.home_address !== null ? { homeAddress: row.home_address } : {}),
+  ...(row.emergency_name !== null ? { emergencyName: row.emergency_name } : {}),
+  ...(row.emergency_relationship !== null
+    ? { emergencyRelationship: row.emergency_relationship }
+    : {}),
+  ...(row.emergency_phone !== null ? { emergencyPhone: row.emergency_phone } : {}),
   annualLeaveDays: row.annual_leave_days,
   annualLeaveTaken: row.annual_leave_taken,
   canLogIn: row.password_hash !== null,
@@ -213,6 +228,8 @@ const EMPLOYEE_SELECT = `
       SELECT sum(i.amount) FROM pay_items i
       WHERE i.employee_id = e.id AND i.kind = 'allowance'
     ), 0) AS monthly_allowances,
+    (SELECT p.updated_at FROM employee_photos p WHERE p.employee_id = e.id)
+      AS photo_updated_at,
     (SELECT count(*) FROM guarantors g WHERE g.employee_id = e.id)::int
       AS guarantor_count,
     (SELECT count(*) FROM guarantors g
@@ -364,7 +381,8 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json());
+// Room for a profile photo (the site shrinks them to well under this).
+app.use(express.json({ limit: "1mb" }));
 
 // Opening the server's address in a browser shows this instead of an error.
 app.get("/", (_req, res) => {
@@ -605,8 +623,35 @@ const readEmployeeForm = (body: Record<string, unknown> | undefined) => {
     optionalText(body?.pensionPin),
     round2(employerPensionPercent),
     body?.nhf === true,
+    ...readPersonalDetails(body).slice(1),
   ];
 };
+
+/**
+ * The details an employee can change themselves, checked: phone, date of
+ * birth, home address and emergency contact.
+ */
+const readPersonalDetails = (body: Record<string, unknown> | undefined) => {
+  const dateOfBirth = optionalText(body?.dateOfBirth);
+  if (dateOfBirth !== null && (!isDay(dateOfBirth) || dateOfBirth >= today()))
+    throw new HttpError(400, "Enter a real date of birth");
+  return [
+    optionalText(body?.phone),
+    dateOfBirth,
+    optionalText(body?.homeAddress),
+    optionalText(body?.emergencyName),
+    optionalText(body?.emergencyRelationship),
+    optionalText(body?.emergencyPhone),
+  ];
+};
+const PERSONAL_COLUMNS = [
+  "phone",
+  "date_of_birth",
+  "home_address",
+  "emergency_name",
+  "emergency_relationship",
+  "emergency_phone",
+] as const;
 
 // The columns readEmployeeForm's values go into, in order, and how a change
 // to each reads in the activity log.
@@ -633,6 +678,11 @@ const EMPLOYEE_FIELDS: [column: keyof EmployeeRow, label: string, show?: (v: nev
   ["pension_pin", "RSA PIN"],
   ["employer_pension_percent", "employer pension %"],
   ["nhf", "NHF", (on: boolean) => (on ? "on" : "off")],
+  ["date_of_birth", "date of birth"],
+  ["home_address", "home address"],
+  ["emergency_name", "emergency contact"],
+  ["emergency_relationship", "emergency contact's relationship"],
+  ["emergency_phone", "emergency contact's phone"],
 ];
 const EMPLOYEE_COLUMNS = EMPLOYEE_FIELDS.map(([column]) => column);
 
@@ -936,6 +986,128 @@ app.put("/me/password", employeeOnly, async (req, res) => {
     role: "employee",
     name: session.name,
   });
+});
+
+// Employees keep their own phone, address and emergency contact up to date.
+// Bank details stay with HR, so nobody can redirect a salary from the portal.
+app.put("/me/details", employeeOnly, async (req, res) => {
+  const values = readPersonalDetails(req.body);
+  const id = sessionOf(res).employeeId!;
+  await transaction(async (client) => {
+    const { rows } = await client.query<EmployeeRow>(
+      "SELECT * FROM employees WHERE id = $1 FOR UPDATE",
+      [id],
+    );
+    const changed = PERSONAL_COLUMNS.filter(
+      (column, i) => String(rows[0][column] ?? null) !== String(values[i] ?? null),
+    );
+    await client.query(
+      `UPDATE employees SET
+         ${PERSONAL_COLUMNS.map((column, i) => `${column} = $${i + 2}`).join(", ")}
+       WHERE id = $1`,
+      [id, ...values],
+    );
+    if (changed.length)
+      await logActivity(
+        client,
+        res,
+        `Updated their ${changed.map((c) => c.replace(/_/g, " ")).join(", ")}`,
+      );
+  });
+  const row = await fetchEmployee(id);
+  res.json({ ...toEmployee(row), annualLeaveLeft: row.annual_leave_days - row.annual_leave_taken });
+});
+
+const PHOTO_MAX_BYTES = 512 * 1024;
+// The first bytes of each image type, so only real images are kept.
+const PHOTO_SIGNATURES: Record<string, (b: Buffer) => boolean> = {
+  "image/jpeg": (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  "image/png": (b) => b.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])),
+  "image/webp": (b) =>
+    b.subarray(0, 4).toString("latin1") === "RIFF" &&
+    b.subarray(8, 12).toString("latin1") === "WEBP",
+};
+
+/** A photo sent as a data: URL, checked. */
+const readPhoto = (value: unknown) => {
+  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(
+    String(value ?? ""),
+  );
+  if (!match) throw new HttpError(400, "Choose a JPEG, PNG or WebP photo");
+  const image = Buffer.from(match[2], "base64");
+  if (image.length > PHOTO_MAX_BYTES) throw new HttpError(400, "That photo is too large");
+  if (!PHOTO_SIGNATURES[match[1]](image))
+    throw new HttpError(400, "That file isn't a JPEG, PNG or WebP photo");
+  return { contentType: match[1], image };
+};
+
+/** Sets (or, with no photo, removes) an employee's photo, and logs it. */
+async function savePhoto(
+  res: express.Response,
+  employeeId: string,
+  photo: ReturnType<typeof readPhoto> | null,
+) {
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ name: string }>(
+      "SELECT name FROM employees WHERE id = $1",
+      [employeeId],
+    );
+    if (!rows[0]) throw new HttpError(404, "Employee not found");
+    const own = sessionOf(res).role === "employee";
+    if (photo) {
+      await client.query(
+        `INSERT INTO employee_photos (employee_id, content_type, image)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (employee_id) DO UPDATE SET content_type = $2, image = $3,
+           updated_at = clock_timestamp()`,
+        [employeeId, photo.contentType, photo.image],
+      );
+      await logActivity(client, res, own ? "Changed their photo" : `Changed ${rows[0].name}'s photo`);
+    } else {
+      const { rowCount } = await client.query(
+        "DELETE FROM employee_photos WHERE employee_id = $1",
+        [employeeId],
+      );
+      if (rowCount)
+        await logActivity(client, res, own ? "Removed their photo" : `Removed ${rows[0].name}'s photo`);
+    }
+  });
+  res.json(toEmployee(await fetchEmployee(employeeId)));
+}
+
+app.put("/me/photo", employeeOnly, async (req, res) => {
+  await savePhoto(res, sessionOf(res).employeeId!, readPhoto(req.body?.photo));
+});
+app.delete("/me/photo", employeeOnly, async (_req, res) => {
+  await savePhoto(res, sessionOf(res).employeeId!, null);
+});
+app.put("/employees/:id/photo", adminOnly, async (req, res) => {
+  await savePhoto(res, String(req.params.id), readPhoto(req.body?.photo));
+});
+app.delete("/employees/:id/photo", adminOnly, async (req, res) => {
+  await savePhoto(res, String(req.params.id), null);
+});
+
+// Admins see everyone's photo; an employee sees their own.
+app.get("/employees/:id/photo", anyone, async (req, res) => {
+  const session = sessionOf(res);
+  if (session.role === "employee" && session.employeeId !== req.params.id) {
+    res.status(403).json({ error: "You can only see your own photo" });
+    return;
+  }
+  const { rows } = await db.query<{ content_type: string; image: Buffer }>(
+    "SELECT content_type, image FROM employee_photos WHERE employee_id = $1",
+    [req.params.id],
+  );
+  if (!rows[0]) {
+    res.status(404).json({ error: "No photo" });
+    return;
+  }
+  res
+    .set("Cache-Control", "private, max-age=86400")
+    .set("X-Content-Type-Options", "nosniff")
+    .type(rows[0].content_type)
+    .send(rows[0].image);
 });
 
 // Employees only see payslips once the month's payroll is marked paid.
@@ -1862,6 +2034,61 @@ app.put("/admins/:id/active", adminOnly, async (req, res) => {
   res.json(toAdmin(row));
 });
 
+// --- Noticeboard -----------------------------------------------------------
+
+type AnnouncementRow = {
+  id: string;
+  title: string;
+  body: string;
+  posted_by: string;
+  created_at: Date;
+};
+
+const toAnnouncement = (row: AnnouncementRow): Announcement => ({
+  id: row.id,
+  title: row.title,
+  body: row.body,
+  postedBy: row.posted_by,
+  createdAt: row.created_at.toISOString(),
+});
+
+app.get("/announcements", anyone, async (_req, res) => {
+  const { rows } = await db.query<AnnouncementRow>(
+    "SELECT * FROM announcements ORDER BY created_at DESC LIMIT 20",
+  );
+  res.json(rows.map(toAnnouncement));
+});
+
+app.post("/announcements", adminOnly, async (req, res) => {
+  const title = String(req.body?.title ?? "").trim();
+  const body = String(req.body?.body ?? "").trim();
+  if (!title || !body) throw new HttpError(400, "Enter a title and the message");
+  if (title.length > 120) throw new HttpError(400, "Keep the title under 120 characters");
+  if (body.length > 2000) throw new HttpError(400, "Keep the message under 2,000 characters");
+  const row = await transaction(async (client) => {
+    const { rows } = await client.query<AnnouncementRow>(
+      `INSERT INTO announcements (id, title, body, posted_by)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [randomUUID(), title, body, actorOf(sessionOf(res))],
+    );
+    await logActivity(client, res, `Posted a notice: ${title}`);
+    return rows[0];
+  });
+  res.status(201).json(toAnnouncement(row));
+});
+
+app.delete("/announcements/:id", adminOnly, async (req, res) => {
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ title: string }>(
+      "DELETE FROM announcements WHERE id = $1 RETURNING title",
+      [req.params.id],
+    );
+    if (!rows[0]) throw new HttpError(404, "Notice not found");
+    await logActivity(client, res, `Took down the notice: ${rows[0].title}`);
+  });
+  res.sendStatus(204);
+});
+
 // --- Activity --------------------------------------------------------------
 
 app.get("/activity", adminOnly, async (_req, res) => {
@@ -1936,11 +2163,18 @@ app.get("/backup", adminOnly, async (_req, res) => {
     "public_holidays",
     "admins",
     "activity_log",
+    "announcements",
+    "employee_photos",
   ];
   const data: Record<string, unknown[]> = {};
   for (const table of tables) {
     const { rows } = await db.query(`SELECT * FROM ${table}`);
-    data[table] = rows.map(({ salt: _salt, password_hash: _hash, ...rest }) => rest);
+    data[table] = rows.map(({ salt: _salt, password_hash: _hash, ...rest }) =>
+      // Photos as base64 text, rather than JSON's list-of-bytes form.
+      Object.fromEntries(
+        Object.entries(rest).map(([k, v]) => [k, Buffer.isBuffer(v) ? v.toString("base64") : v]),
+      ),
+    );
   }
   await logActivity(db, res, "Downloaded a backup of all HR data");
   res

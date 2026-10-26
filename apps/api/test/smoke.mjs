@@ -172,6 +172,33 @@ expectStatus("admin leave without employee", await call("POST", "/leave", { toke
 const mine = await call("GET", "/leave/mine", { token: T });
 check("/leave/mine has 3", mine.body.length === 3, mine.body.length);
 
+console.log("Photos, details and noticeboard");
+const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+const withPhoto = await call("PUT", "/me/photo", { token: T, body: { photo: PNG } });
+check("upload own photo", withPhoto.status === 200 && !!withPhoto.body.photoVersion, withPhoto.body);
+const ownPhoto = await fetch(`${BASE}/employees/${E1}/photo`, { headers: { Authorization: `Bearer ${T}` } });
+check("see own photo", ownPhoto.status === 200 && ownPhoto.headers.get("content-type") === "image/png", ownPhoto.status);
+expectStatus("can't see a colleague's photo", await call("GET", `/employees/${E2}/photo`, { token: T }), 403);
+const adminSees = await fetch(`${BASE}/employees/${E1}/photo`, { headers: { Authorization: `Bearer ${A}` } });
+check("admin sees the photo", adminSees.status === 200);
+check("employee list carries photo version", (await call("GET", "/employees", { token: A })).body.find((e) => e.id === E1)?.photoVersion === withPhoto.body.photoVersion);
+expectStatus("fake image refused", await call("PUT", "/me/photo", { token: T, body: { photo: `data:image/png;base64,${Buffer.from("not an image").toString("base64")}` } }), 400);
+expectStatus("non-image refused", await call("PUT", "/me/photo", { token: T, body: { photo: "data:text/html;base64,PGI+aGk8L2I+" } }), 400);
+expectStatus("admin sets someone's photo", await call("PUT", `/employees/${E2}/photo`, { token: A, body: { photo: PNG } }), 200);
+const noPhoto = await call("DELETE", "/me/photo", { token: T });
+check("remove own photo", noPhoto.status === 200 && !noPhoto.body.photoVersion, noPhoto.body);
+const details = await call("PUT", "/me/details", { token: T, body: { phone: "08030000000", dateOfBirth: "1995-05-04", homeAddress: "1 Lekki Rd", emergencyName: "Bisi", emergencyRelationship: "Sister", emergencyPhone: "08031111111" } });
+check("update own details", details.status === 200 && details.body.emergencyName === "Bisi" && details.body.dateOfBirth === "1995-05-04", details.body);
+expectStatus("future birthday refused", await call("PUT", "/me/details", { token: T, body: { dateOfBirth: "2999-01-01" } }), 400);
+await call("PUT", "/me/details", { token: T, body: { ...details.body, bankAccountNumber: "6666666666" } });
+check("staff can't change their bank account", (await call("GET", "/me", { token: T })).body.bankAccountNumber === "0123456789");
+const posted = await call("POST", "/announcements", { token: A, body: { title: `Notice ${tag}`, body: "Office closed Friday" } });
+expectStatus("post a notice", posted, 201);
+expectStatus("empty notice refused", await call("POST", "/announcements", { token: A, body: { title: "x" } }), 400);
+expectStatus("employee can't post notices", await call("POST", "/announcements", { token: T, body: { title: "x", body: "y" } }), 403);
+check("employee sees the notice", (await call("GET", "/announcements", { token: T })).body.some((n) => n.title === `Notice ${tag}` && n.postedBy === "Owner"));
+expectStatus("take down notice", await call("DELETE", `/announcements/${posted.body.id}`, { token: A }), 204);
+
 console.log("Public holidays");
 const hols = await call("GET", "/holidays", { token: T });
 check("holidays are seeded", hols.status === 200 && hols.body.some((h) => h.day === "2026-12-25"), hols.body.length);
@@ -378,7 +405,7 @@ check("logs a named admin's change", said(new RegExp(`Added the Bola dept ${tag}
 check("logs deactivating an admin", said(/Deactivated admin Bola Admin/));
 const backup = await call("GET", "/backup", { token: A });
 expectStatus("backup", backup, 200);
-check("backup has every table", ["employees", "payslips", "activity_log", "admins"].every((t) => Array.isArray(backup.body.tables?.[t])));
+check("backup has every table", ["employees", "payslips", "activity_log", "admins", "employee_photos", "announcements"].every((t) => Array.isArray(backup.body.tables?.[t])));
 check("backup leaves out password hashes", !JSON.stringify(backup.body).includes("password_hash"));
 expectStatus("employee can't download backup", await call("GET", "/backup", { token: T }), 403);
 

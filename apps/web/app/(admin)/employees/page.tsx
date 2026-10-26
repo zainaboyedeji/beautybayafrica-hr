@@ -3,6 +3,7 @@
 import { useEffect, useState, type ChangeEvent } from "react";
 import type { Employee, EmploymentType, PayeMode, PayItem, PayItemKind } from "@hr/types";
 import ConfirmDialog from "../../components/confirm-dialog";
+import PhotoPicker from "../../components/photo-picker";
 import Guarantors from "../../components/guarantors";
 import { Person } from "../../components/avatar";
 import {
@@ -65,6 +66,11 @@ export default function EmployeesPage() {
   ].sort((a, b) => a[1].localeCompare(b[1]));
 
   const close = () => setDialog(null);
+  // A photo is saved as soon as it is chosen, so show it even if the form is cancelled.
+  const closeAndReload = () => {
+    setDialog(null);
+    void employees.reload();
+  };
   const saved = (message: string) => {
     setDialog(null);
     setNotice(message);
@@ -126,9 +132,9 @@ export default function EmployeesPage() {
         <Modal
           wide
           title={dialog.employee ? `Edit ${dialog.employee.name}` : "Add employee"}
-          onClose={close}
+          onClose={closeAndReload}
         >
-          <EmployeeForm employee={dialog.employee} onCancel={close} onSaved={saved} />
+          <EmployeeForm employee={dialog.employee} onCancel={closeAndReload} onSaved={saved} />
         </Modal>
       )}
       {dialog?.kind === "login" && (
@@ -227,7 +233,12 @@ export default function EmployeesPage() {
               {visible.map((e) => (
                 <tr key={e.id} className={`align-top ${hasLeft(e) ? "text-muted" : ""}`}>
                   <td className="px-5 py-4">
-                    <Person name={e.name} detail={`${e.employeeNo} · ${e.email}`} />
+                    <Person
+                      name={e.name}
+                      detail={`${e.employeeNo} · ${e.email}`}
+                      employeeId={e.id}
+                      photoVersion={e.photoVersion}
+                    />
                     {e.deactivatedAt && (
                       <span className="mt-1 inline-block rounded-full bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700">
                         Deactivated {formatDay(new Date(e.deactivatedAt).toLocaleDateString("en-CA"))}
@@ -379,8 +390,15 @@ function EmployeeForm({
     taxId: employee?.taxId ?? "",
     pensionProvider: employee?.pensionProvider ?? "",
     pensionPin: employee?.pensionPin ?? "",
+    dateOfBirth: employee?.dateOfBirth ?? "",
+    homeAddress: employee?.homeAddress ?? "",
+    emergencyName: employee?.emergencyName ?? "",
+    emergencyRelationship: employee?.emergencyRelationship ?? "",
+    emergencyPhone: employee?.emergencyPhone ?? "",
     password: "",
   });
+  // The photo is saved straight away, so it shows the latest version.
+  const [photoVersion, setPhotoVersion] = useState(employee?.photoVersion);
   const [nhf, setNhf] = useState(employee?.nhf ?? false);
   // A new employee starts with no allowances; an existing one's are loaded.
   const [items, setItems] = useState<DraftItem[] | null>(employee ? null : []);
@@ -440,6 +458,13 @@ function EmployeeForm({
         void submit();
       }}
     >
+      {employee && (
+        <PhotoPicker
+          employee={{ ...employee, photoVersion }}
+          path={`/employees/${employee.id}/photo`}
+          onChanged={(updated) => setPhotoVersion(updated.photoVersion)}
+        />
+      )}
       <div className="grid gap-3 sm:grid-cols-3">
         <label className="text-sm font-medium">
           Staff number
@@ -555,6 +580,32 @@ function EmployeeForm({
         </label>
       </div>
       <PaySummary form={form} nhf={nhf} items={items ?? []} />
+
+      <p className="mt-2 text-sm font-semibold">
+        Personal details <span className="font-normal text-muted">(the employee can also update these in the staff portal)</span>
+      </p>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <label className="text-sm font-medium">
+          Date of birth
+          <input type="date" max={today()} {...field("dateOfBirth")} />
+        </label>
+        <label className="text-sm font-medium sm:col-span-2">
+          Home address
+          <input {...field("homeAddress")} />
+        </label>
+        <label className="text-sm font-medium">
+          Emergency contact
+          <input {...field("emergencyName")} />
+        </label>
+        <label className="text-sm font-medium">
+          Their relationship
+          <input placeholder="e.g. Sister" {...field("emergencyRelationship")} />
+        </label>
+        <label className="text-sm font-medium">
+          Their phone
+          <input type="tel" {...field("emergencyPhone")} />
+        </label>
+      </div>
 
       <p className="mt-2 text-sm font-semibold">
         Tax and pension details{" "}
