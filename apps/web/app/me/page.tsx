@@ -28,6 +28,7 @@ import Modal from "../components/modal";
 import { Notice } from "../components/notice";
 import NoticeCard, { timeAgo } from "../components/notice-card";
 import PayslipView from "../components/payslip-view";
+import PasswordInput from "../components/password-input";
 import PhotoPicker from "../components/photo-picker";
 import StatusBadge from "../components/status-badge";
 import {
@@ -1090,10 +1091,9 @@ function ChooseOwnPassword({ name }: { name: string }) {
   const field = (key: keyof typeof form, label: string, hint?: string, autoComplete = "new-password") => (
     <label className="text-sm font-medium">
       {label} {hint && <span className="font-normal text-muted">{hint}</span>}
-      <input
+      <PasswordInput
         required
         minLength={key === "currentPassword" ? undefined : 8}
-        type="password"
         autoComplete={autoComplete}
         value={form[key]}
         onChange={(e) => setForm({ ...form, [key]: e.target.value })}

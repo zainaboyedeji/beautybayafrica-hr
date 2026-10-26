@@ -5,6 +5,7 @@ import { INPUT, PRIMARY_BUTTON } from "../components/form-styles";
 import { API_URL, describeError } from "../lib/api";
 import { homeOf, saveSession, type Session } from "../lib/auth";
 import Icon from "../components/icons";
+import PasswordInput from "../components/password-input";
 
 type Mode = "employee" | "admin";
 
@@ -145,10 +146,9 @@ export default function LoginPage() {
           )}
           <label className={`mt-4 block text-sm font-medium ${forgot ? "hidden" : ""}`}>
             Password
-            <input
+            <PasswordInput
               key={mode}
               required={!forgot}
-              type="password"
               autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
