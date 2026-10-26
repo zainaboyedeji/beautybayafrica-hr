@@ -28,6 +28,7 @@ import {
   weekdaysBetween,
 } from "./payroll";
 import { salaryReference } from "@hr/types";
+import { payslipPdf } from "./payslip-pdf";
 import express from "express";
 import type { PoolClient } from "pg";
 import { randomUUID } from "node:crypto";
@@ -1156,6 +1157,31 @@ app.get("/payslips/mine", employeeOnly, async (_req, res) => {
   res.json(rows.map(toPayslip));
 });
 
+const COMPANY_NAME = process.env.COMPANY_NAME ?? "Beauty Bay Africa";
+
+/** Sends a payslip as a PDF download, named after the person and month. */
+const sendPayslipPdf = async (res: express.Response, row: PayslipRow) => {
+  const payslip = toPayslip(row);
+  res
+    .type("application/pdf")
+    .attachment(`Payslip ${payslip.period} ${payslip.employeeName}.pdf`)
+    .send(await payslipPdf(payslip, COMPANY_NAME));
+};
+
+// An employee's own payslip as a PDF, once it is paid.
+app.get("/payslips/mine/:period/pdf", employeeOnly, async (req, res) => {
+  const { rows } = await db.query<PayslipRow>(
+    `SELECT * FROM payslips
+     WHERE period = $1 AND employee_id = $2 AND paid_at IS NOT NULL`,
+    [req.params.period, sessionOf(res).employeeId],
+  );
+  if (!rows[0]) {
+    res.status(404).json({ error: "No paid payslip for that month" });
+    return;
+  }
+  await sendPayslipPdf(res, rows[0]);
+});
+
 // --- Leave -----------------------------------------------------------------
 
 const LEAVE_TYPES: LeaveType[] = [
@@ -1774,6 +1800,19 @@ app.get("/payroll/:period/pension.csv", adminOnly, async (req, res) => {
         round2(own + p.employerPension).toFixed(2),
       ]),
   ]);
+});
+
+// Anyone's payslip as a PDF, for HR (drafts too, marked NOT PAID YET).
+app.get("/payroll/:period/payslips/:employeeId/pdf", adminOnly, async (req, res) => {
+  const { rows } = await db.query<PayslipRow>(
+    "SELECT * FROM payslips WHERE period = $1 AND employee_id = $2",
+    [req.params.period, req.params.employeeId],
+  );
+  if (!rows[0]) {
+    res.status(404).json({ error: "No payslip for them that month" });
+    return;
+  }
+  await sendPayslipPdf(res, rows[0]);
 });
 
 // The month's bank transfers as a spreadsheet, for the bank's bulk payment upload.

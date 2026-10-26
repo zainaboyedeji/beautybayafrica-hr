@@ -1,8 +1,11 @@
 "use client";
 
+import { useState } from "react";
 import { createPortal } from "react-dom";
 import type { PayLine, Payslip } from "@hr/types";
-import { money } from "../lib/api";
+import { describeError, downloadFile, money } from "../lib/api";
+import { SECONDARY_BUTTON } from "./form-styles";
+import Icon from "./icons";
 import { formatDay, formatPeriod } from "../lib/format";
 
 const COMPANY = process.env.NEXT_PUBLIC_COMPANY_NAME ?? "Beauty Bay Africa";
@@ -28,14 +31,37 @@ export default function PayslipView({ payslip }: { payslip: Payslip }) {
 }
 
 /**
- * Prints the payslip that is open, or saves it as a PDF. The file is named
- * after the person and month, e.g. "Payslip 2026-11 Amaka Obi".
+ * Downloads the payslip as a PDF made by the server, named after the person
+ * and month, e.g. "Payslip 2026-11 Amaka Obi.pdf". `path` is the staff
+ * portal's or HR's address for it.
  */
-export function printPayslip(p: Payslip) {
-  const title = document.title;
-  document.title = `Payslip ${p.period} ${p.employeeName}`;
-  window.print();
-  document.title = title;
+export function DownloadPayslip({ payslip: p, path }: { payslip: Payslip; path: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const download = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await downloadFile(
+        path,
+        `Payslip ${p.period} ${p.employeeName}.pdf`,
+        "Could not download the payslip",
+      );
+    } catch (e) {
+      setError(describeError(e, "Could not download the payslip"));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <button onClick={() => void download()} disabled={busy} className={SECONDARY_BUTTON}>
+        <Icon name="download" className="h-4 w-4" />
+        {busy ? "Preparing PDF…" : "Download PDF"}
+      </button>
+      {error && <p className="text-sm text-red-700">{error}</p>}
+    </div>
+  );
 }
 
 function Slip({ payslip: p, forPrint }: { payslip: Payslip; forPrint?: boolean }) {

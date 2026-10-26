@@ -325,6 +325,18 @@ const csv2 = await call("GET", `/payroll/${P}/bank.csv`, { token: A });
 check("CSV excludes paid", !csv2.body.includes(`T1-${tag}`.toUpperCase()) && !csv2.body.includes(`T1-${tag}`));
 const mySlips = await call("GET", "/payslips/mine", { token: T });
 check("employee sees paid payslip", mySlips.body.length === 1 && mySlips.body[0].period === P, mySlips.body);
+const pdfOf = async (path, token) => {
+  const res = await fetch(BASE + path, { headers: { Authorization: `Bearer ${token}` } });
+  const bytes = Buffer.from(await res.arrayBuffer());
+  return { status: res.status, type: res.headers.get("content-type"), name: res.headers.get("content-disposition"), isPdf: bytes.subarray(0, 5).toString() === "%PDF-" };
+};
+const myPdf = await pdfOf(`/payslips/mine/${P}/pdf`, T);
+check("employee downloads own payslip PDF", myPdf.status === 200 && myPdf.isPdf && myPdf.type === "application/pdf", myPdf);
+check("PDF named after person and month", (myPdf.name ?? "").includes(`Payslip ${P} Ada Test.pdf`), myPdf.name);
+expectStatus("no PDF for an unpaid month", await call("GET", "/payslips/mine/2026-08/pdf", { token: T }), 404);
+expectStatus("employee can't use HR's PDF route", await call("GET", `/payroll/${P}/payslips/${E2}/pdf`, { token: T }), 403);
+const hrPdf = await pdfOf(`/payroll/${P}/payslips/${E2}/pdf`, A);
+check("HR downloads anyone's payslip PDF (draft too)", hrPdf.status === 200 && hrPdf.isPdf, hrPdf);
 const rc2 = await call("POST", `/payroll/${P}/recalculate`, { token: A });
 check("recalc keeps paid payslip", near(rc2.body.payslips.find((p) => p.employeeId === E1).net, p1.net));
 expectStatus("delete run with paid people", await call("DELETE", `/payroll/${P}`, { token: A }), 409);
