@@ -14,7 +14,29 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Forgot password?": asks HR for a new one instead of logging in.
+  const [forgot, setForgot] = useState(false);
+  const [sent, setSent] = useState<string | null>(null);
   const waking = useWakeServer();
+
+  const askForPassword = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_URL}/auth/password-request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Could not send the request");
+      setSent(body.message);
+    } catch (e) {
+      setError(describeError(e, "Could not send the request"));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const submit = async () => {
     setSaving(true);
@@ -53,7 +75,7 @@ export default function LoginPage() {
           className="w-full max-w-sm animate-fade-up"
           onSubmit={(e) => {
             e.preventDefault();
-            void submit();
+            void (forgot ? askForPassword() : submit());
           }}
         >
           <div>
@@ -83,6 +105,8 @@ export default function LoginPage() {
                 aria-selected={mode === m}
                 onClick={() => {
                   setMode(m);
+                  setForgot(false);
+                  setSent(null);
                   setEmail("");
                   setPassword("");
                   setError(null);
@@ -113,11 +137,17 @@ export default function LoginPage() {
               className={`${INPUT} h-12`}
             />
           </label>
-          <label className="mt-4 block text-sm font-medium">
+          {forgot && (
+            <p className="mt-3 text-sm text-muted">
+              Enter your work email and HR will be asked to give you a new password. They tell
+              you it in person, then you choose your own when you log in.
+            </p>
+          )}
+          <label className={`mt-4 block text-sm font-medium ${forgot ? "hidden" : ""}`}>
             Password
             <input
               key={mode}
-              required
+              required={!forgot}
               type="password"
               autoComplete="current-password"
               value={password}
@@ -125,6 +155,11 @@ export default function LoginPage() {
               className={`${INPUT} h-12`}
             />
           </label>
+          {sent && (
+            <p role="status" className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+              {sent}
+            </p>
+          )}
           {waking && !error && (
             <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
               Waking up the server. The first visit after a quiet spell can take up to a
@@ -144,13 +179,27 @@ export default function LoginPage() {
             disabled={saving}
             className={`${PRIMARY_BUTTON} mt-7 h-12 w-full`}
           >
-            {saving ? "Logging in…" : "Log in"}
+            {forgot
+              ? saving ? "Sending…" : "Ask HR for a new password"
+              : saving ? "Logging in…" : "Log in"}
           </button>
         </form>
         <p className="mt-6 w-full max-w-sm text-xs text-muted">
-          {isEmployee
-            ? "Forgotten your password? Ask HR to set a new one."
-            : "Forgotten your password? Ask another admin, or the owner, to set a new one."}
+          {isEmployee ? (
+            <button
+              type="button"
+              onClick={() => {
+                setForgot(!forgot);
+                setSent(null);
+                setError(null);
+              }}
+              className="font-semibold text-brand-deep hover:underline"
+            >
+              {forgot ? "← Back to log in" : "Forgotten your password?"}
+            </button>
+          ) : (
+            "Forgotten your password? Ask another admin, or the owner, to set a new one."
+          )}
         </p>
       </div>
     </div>

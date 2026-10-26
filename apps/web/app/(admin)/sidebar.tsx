@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 import Icon, { type IconName } from "../components/icons";
-import { fetchLeave, useLoad } from "../lib/api";
+import { fetchLeave, fetchRequests, useLoad } from "../lib/api";
 import { logOut, useSession } from "../lib/auth";
 
 // Each section has its own icon tint, so the menu reads at a glance.
@@ -13,6 +13,7 @@ const LINKS: { href: string; label: string; icon: IconName; tint: string }[] = [
   { href: "/employees", label: "Employees", icon: "users", tint: "bg-violet-100 text-violet-700" },
   { href: "/departments", label: "Departments", icon: "building", tint: "bg-sky-100 text-sky-800" },
   { href: "/leave", label: "Leave", icon: "calendar", tint: "bg-amber-100 text-amber-800" },
+  { href: "/requests", label: "Requests", icon: "inbox", tint: "bg-brand-soft text-brand-deep" },
   { href: "/payroll", label: "Payroll", icon: "wallet", tint: "bg-emerald-100 text-emerald-800" },
   { href: "/activity", label: "Activity", icon: "clock", tint: "bg-rose-100 text-rose-700" },
   { href: "/settings", label: "Settings", icon: "key", tint: "bg-slate-100 text-slate-700" },
@@ -22,12 +23,19 @@ export default function Sidebar() {
   const pathname = usePathname().replace(/\/$/, "") || "/";
   const session = useSession(["admin"]);
   const leave = useLoad(fetchLeave);
+  const requests = useLoad(fetchRequests);
   const { reload } = leave;
-  // Check for new leave requests whenever the admin moves to another page.
+  const { reload: reloadRequests } = requests;
+  // Check for new leave and requests whenever the admin moves to another page.
   useEffect(() => {
     void reload();
-  }, [pathname, reload]);
-  const pending = leave.data?.filter((l) => l.status === "pending").length ?? 0;
+    void reloadRequests();
+  }, [pathname, reload, reloadRequests]);
+  // What's waiting, shown as a count next to the page.
+  const waiting: Record<string, number> = {
+    "/leave": leave.data?.filter((l) => l.status === "pending").length ?? 0,
+    "/requests": requests.data?.filter((r) => r.status === "open").length ?? 0,
+  };
 
   return (
     <aside className="no-print flex w-64 shrink-0 flex-col rounded-3xl bg-white/85 p-4 shadow-soft ring-1 ring-line backdrop-blur">
@@ -63,14 +71,14 @@ export default function Sidebar() {
                 <Icon name={link.icon} className="h-[18px] w-[18px]" />
               </span>
               {link.label}
-              {link.href === "/leave" && pending > 0 && (
+              {(waiting[link.href] ?? 0) > 0 && (
                 <span
-                  aria-label={`${pending} waiting`}
+                  aria-label={`${waiting[link.href]} waiting`}
                   className={`ml-auto rounded-full px-2 py-0.5 text-xs font-bold ${
                     active ? "bg-white text-brand-deep" : "bg-brand text-ink"
                   }`}
                 >
-                  {pending}
+                  {waiting[link.href]}
                 </span>
               )}
             </Link>

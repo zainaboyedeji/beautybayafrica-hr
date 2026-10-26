@@ -67,6 +67,8 @@ export interface Employee {
   annualLeaveTaken: number;
   /** True once the admin has given them a password for the staff portal. */
   canLogIn: boolean;
+  /** True while they still have HR's temporary password, until they set their own. */
+  mustChangePassword: boolean;
   /** Set while deactivated: they can't use the staff portal at all. */
   deactivatedAt?: string;
   /** How many guarantors are on file, and how many HR has verified. */
@@ -226,6 +228,30 @@ export interface Announcement {
   updatedAt?: string;
   /** Who posted it, e.g. "Bola (admin)". */
   postedBy: string;
+  createdAt: string;
+}
+
+export type StaffRequestType =
+  | "password_reset"
+  | "bank_change"
+  | "details_correction"
+  | "letter"
+  | "other";
+export type StaffRequestStatus = "open" | "done" | "declined" | "cancelled";
+
+/** Something an employee has asked HR for. */
+export interface StaffRequest {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  employeeNo: string;
+  type: StaffRequestType;
+  details?: string;
+  status: StaffRequestStatus;
+  /** HR's reply, which the employee sees. */
+  response?: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
   createdAt: string;
 }
 

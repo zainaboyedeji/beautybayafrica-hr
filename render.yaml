@@ -85,6 +85,9 @@ services:
       - type: rewrite
         source: /settings
         destination: /settings.html
+      - type: rewrite
+        source: /requests
+        destination: /requests.html
     envVars:
       - key: NODE_VERSION
         value: "24"

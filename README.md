@@ -62,8 +62,15 @@ month** with a reason, undo the payments that need changing, fix them and pay ag
 year, the next public holiday, HR's notices and their upcoming leave), ask for and
 cancel leave, view and print payslips with year-to-date totals, add a profile
 photo, keep their phone, address, date of birth and emergency contact up to date,
-and manage their guarantors. Bank details and passwords stay with HR: staff see
-their account masked, and only HR sets portal passwords (Employees → **Portal**).
+and manage their guarantors. Bank details stay with HR and are shown masked.
+
+**Passwords and requests.** A password HR gives (Employees → **Portal**) is
+temporary: the next time the employee logs in, they must choose their own before
+they can do anything else. After that only HR changes it. Staff ask HR for a new
+password, a bank change, a correction, a letter or anything else on the portal's
+**Requests** tab (or "Forgotten your password?" on the login page), and HR
+answers on the **Requests** page, where a password request can be closed by
+setting the temporary password.
 HR posts notices on the dashboard's **Noticeboard** (General, Important, Event or
 Celebration; pinned ones stay on top), which also lists birthdays.
 

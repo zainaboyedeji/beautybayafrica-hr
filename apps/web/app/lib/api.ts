@@ -16,6 +16,7 @@ import type {
   PayrollRunDetail,
   Payslip,
   PublicHoliday,
+  StaffRequest,
 } from "@hr/types";
 import { getSession, logOut } from "./auth";
 
@@ -82,6 +83,8 @@ export const fetchAdmins = getJson<Admin[]>("/admins");
 export const fetchActivity = getJson<Activity[]>("/activity");
 export const fetchHolidays = getJson<PublicHoliday[]>("/holidays");
 export const fetchAnnouncements = getJson<Announcement[]>("/announcements");
+export const fetchRequests = getJson<StaffRequest[]>("/requests");
+export const fetchMyRequests = getJson<StaffRequest[]>("/requests/mine");
 
 /** Saves a file from the API (a CSV, a backup) to the user's computer. */
 export async function downloadFile(path: string, fileName: string, fallback: string) {

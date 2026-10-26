@@ -644,9 +644,9 @@ function EmployeeForm({
       </div>
       {!employee && (
         <label className="text-sm font-medium">
-          Staff portal password{" "}
+          Temporary staff portal password{" "}
           <span className="font-normal text-muted">
-            (optional, at least 8 characters; you can set it later)
+            (optional, at least 8 characters; they choose their own when they first log in)
           </span>
           <input type="text" autoComplete="new-password" {...field("password")} />
         </label>
@@ -842,7 +842,7 @@ function LoginForm({ employee, onSaved, onCancel }: FormProps) {
       );
       onSaved(
         method === "PUT"
-          ? `${employee.name} can log in with ${employee.email} and the new password. Tell them in person.`
+          ? `${employee.name} can log in with ${employee.email} and this temporary password. Tell them in person; they choose their own when they log in.`
           : `${employee.name} can no longer use the staff portal.`,
       );
     } catch (e) {
@@ -862,9 +862,23 @@ function LoginForm({ employee, onSaved, onCancel }: FormProps) {
       <p className="text-sm text-muted">
         In the staff portal, {employee.name} can see their payslips and leave,
         and ask for leave. They log in with <span className="font-medium text-ink">{employee.email}</span>.
+        The password you set here is temporary: they choose their own the first time they log in.
       </p>
+      {employee.canLogIn && (
+        <p
+          className={`rounded-2xl px-4 py-3 text-sm ${
+            employee.mustChangePassword
+              ? "bg-amber-50 text-amber-800 ring-1 ring-amber-200"
+              : "bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200"
+          }`}
+        >
+          {employee.mustChangePassword
+            ? "They haven't logged in to choose their own password yet."
+            : "They have chosen their own password."}
+        </p>
+      )}
       <label className="text-sm font-medium">
-        {employee.canLogIn ? "New password" : "Password"}{" "}
+        {employee.canLogIn ? "New temporary password" : "Temporary password"}{" "}
         <span className="font-normal text-muted">(at least 8 characters)</span>
         <input
           autoFocus

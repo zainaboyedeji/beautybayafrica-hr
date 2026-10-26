@@ -16,6 +16,8 @@ export type Session = {
   /** When the login was made, so a password reset can end older ones. */
   iat: number;
   exp: number;
+  /** Checked on each request, not stored in the token: still on HR's temporary password. */
+  mustChangePassword?: boolean;
 };
 
 /** Who did something, for the activity log. */
@@ -85,13 +87,15 @@ const readToken = async (header: string | undefined): Promise<Session | null> =>
   // company time), or whose portal access was removed, is logged out straight
   // away: this is checked on every request. The same goes for admins.
   if (session.role === "employee") {
-    const { rowCount } = await db.query(
-      `SELECT 1 FROM employees WHERE id = $1 AND password_hash IS NOT NULL
+    const { rows } = await db.query<{ must_change_password: boolean }>(
+      `SELECT must_change_password FROM employees WHERE id = $1
+         AND password_hash IS NOT NULL
          AND deactivated_at IS NULL AND (end_date IS NULL OR end_date >= $2)
          AND sessions_valid_after <= $3`,
       [session.employeeId, today(), issued],
     );
-    if (!rowCount) return null;
+    if (!rows[0]) return null;
+    session.mustChangePassword = rows[0].must_change_password;
   } else if (session.adminId) {
     const { rowCount } = await db.query(
       `SELECT 1 FROM admins WHERE id = $1 AND deactivated_at IS NULL
@@ -104,7 +108,7 @@ const readToken = async (header: string | undefined): Promise<Session | null> =>
 };
 
 const requireRole =
-  (...roles: Role[]): express.RequestHandler =>
+  (roles: Role[], { whileMustChange = false } = {}): express.RequestHandler =>
   async (req, res, next) => {
     const session = await readToken(req.header("authorization"));
     if (!session) {
@@ -115,6 +119,15 @@ const requireRole =
       res.status(403).json({ error: "Only the admin can do this" });
       return;
     }
+    // Someone on HR's temporary password must choose their own before
+    // anything else.
+    if (session.mustChangePassword && !whileMustChange) {
+      res.status(403).json({
+        error: "Choose your own password first",
+        code: "must_change_password",
+      });
+      return;
+    }
     res.locals.session = session;
     next();
   };
@@ -122,9 +135,11 @@ const requireRole =
 /** The logged-in user, for handlers behind requireRole. */
 export const sessionOf = (res: express.Response) => res.locals.session as Session;
 
-export const anyone = requireRole("admin", "employee");
-export const adminOnly = requireRole("admin");
-export const employeeOnly = requireRole("employee");
+export const anyone = requireRole(["admin", "employee"]);
+export const adminOnly = requireRole(["admin"]);
+export const employeeOnly = requireRole(["employee"]);
+/** For the few staff routes that still work on a temporary password. */
+export const employeeOnTemporaryPassword = requireRole(["employee"], { whileMustChange: true });
 
 // Lock a device out after too many wrong attempts.
 const MAX_FAILED_LOGINS = 5;

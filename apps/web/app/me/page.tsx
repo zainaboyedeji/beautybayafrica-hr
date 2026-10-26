@@ -1,7 +1,14 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import type { Announcement, LeaveRequest, MyProfile, Payslip } from "@hr/types";
+import type {
+  Announcement,
+  LeaveRequest,
+  MyProfile,
+  Payslip,
+  StaffRequest,
+  StaffRequestType,
+} from "@hr/types";
 import Avatar from "../components/avatar";
 import ConfirmDialog from "../components/confirm-dialog";
 import Guarantors from "../components/guarantors";
@@ -19,7 +26,7 @@ import Icon, { type IconName } from "../components/icons";
 import LeaveForm from "../components/leave-form";
 import Modal from "../components/modal";
 import { Notice } from "../components/notice";
-import NoticeCard from "../components/notice-card";
+import NoticeCard, { timeAgo } from "../components/notice-card";
 import PayslipView from "../components/payslip-view";
 import PhotoPicker from "../components/photo-picker";
 import StatusBadge from "../components/status-badge";
@@ -31,25 +38,29 @@ import {
   fetchMe,
   fetchMyLeave,
   fetchMyPayslips,
+  fetchMyRequests,
   money,
   useLoad,
 } from "../lib/api";
-import { logOut } from "../lib/auth";
+import { logOut, saveSession, type Session } from "../lib/auth";
 import {
   EMPLOYMENT_LABELS,
   formatDay,
   formatDays,
   formatPeriod,
   LEAVE_LABELS,
+  REQUEST_STATUS_STYLES,
+  REQUEST_TYPES,
   today,
 } from "../lib/format";
 import { LoadError, Loading } from "../lib/status";
 
-type Tab = "home" | "leave" | "pay" | "profile";
+type Tab = "home" | "leave" | "pay" | "requests" | "profile";
 const TABS: { key: Tab; label: string; icon: IconName }[] = [
   { key: "home", label: "Home", icon: "home" },
   { key: "leave", label: "Leave", icon: "calendar" },
   { key: "pay", label: "Payslips", icon: "wallet" },
+  { key: "requests", label: "Requests", icon: "inbox" },
   { key: "profile", label: "My profile", icon: "user" },
 ];
 
@@ -71,7 +82,10 @@ export default function MyPortalPage() {
   const payslips = useLoad(fetchMyPayslips);
   const holidays = useLoad(fetchHolidays);
   const notices = useLoad(fetchAnnouncements);
+  const requests = useLoad(fetchMyRequests);
   const [tab, setTab] = useState<Tab>("home");
+  // A request type to open straight away, e.g. from "Ask for a new password".
+  const [startRequest, setStartRequest] = useState<StaffRequestType | null>(null);
   const [asking, setAsking] = useState(false);
   const [cancelling, setCancelling] = useState<LeaveRequest | null>(null);
   const [viewing, setViewing] = useState<Payslip | null>(null);
@@ -140,6 +154,8 @@ export default function MyPortalPage() {
           <LoadError />
         ) : !profile ? (
           <Loading />
+        ) : profile.mustChangePassword ? (
+          <ChooseOwnPassword name={profile.name} />
         ) : (
           <>
             {/* Text sits on the deep end of the gradient, where white reads well. */}
@@ -177,14 +193,17 @@ export default function MyPortalPage() {
             <nav
               role="tablist"
               aria-label="Sections"
-              className="no-print mt-5 grid grid-cols-4 gap-1 rounded-full bg-white/85 p-1 text-sm font-semibold shadow-soft ring-1 ring-line"
+              className="no-print mt-5 grid grid-cols-5 gap-1 rounded-full bg-white/85 p-1 text-sm font-semibold shadow-soft ring-1 ring-line"
             >
               {TABS.map((t) => (
                 <button
                   key={t.key}
                   role="tab"
                   aria-selected={tab === t.key}
-                  onClick={() => setTab(t.key)}
+                  onClick={() => {
+                    setTab(t.key);
+                    setStartRequest(null);
+                  }}
                   className={`flex items-center justify-center gap-2 rounded-full py-2.5 transition ${
                     tab === t.key
                       ? "bg-gradient-to-r from-brand to-brand-hover text-ink shadow-md shadow-brand/30"
@@ -234,7 +253,25 @@ export default function MyPortalPage() {
               />
             )}
             {tab === "profile" && (
-              <ProfileTab profile={profile} onEdit={() => setEditing(true)} />
+              <ProfileTab
+                profile={profile}
+                onEdit={() => setEditing(true)}
+                onAskPassword={() => {
+                  setStartRequest("password_reset");
+                  setTab("requests");
+                }}
+              />
+            )}
+            {tab === "requests" && (
+              <RequestsTab
+                key={startRequest ?? "none"}
+                requests={requests}
+                startWith={startRequest}
+                onChanged={(message) => {
+                  setStartRequest(null);
+                  setNotice(message);
+                }}
+              />
             )}
           </>
         )}
@@ -624,7 +661,15 @@ function Figure({ label, value, strong }: { label: string; value: string; strong
 /** "••••6789": enough to recognise the account, not enough to misuse it. */
 const masked = (account?: string) => (account ? `••••${account.slice(-4)}` : "Not given");
 
-function ProfileTab({ profile, onEdit }: { profile: MyProfile; onEdit: () => void }) {
+function ProfileTab({
+  profile,
+  onEdit,
+  onAskPassword,
+}: {
+  profile: MyProfile;
+  onEdit: () => void;
+  onAskPassword: () => void;
+}) {
   return (
     <div className="mt-6 flex flex-col gap-6">
       <div className="grid gap-6 lg:grid-cols-2">
@@ -670,8 +715,8 @@ function ProfileTab({ profile, onEdit }: { profile: MyProfile; onEdit: () => voi
             />
           </dl>
           <p className="mt-3 text-xs text-muted">
-            To change your job details or bank account, speak to HR. Bank changes are only made
-            by HR, to keep your salary safe.
+            To change your job details or bank account, send HR a request (Requests tab). Bank
+            changes are only made by HR, to keep your salary safe.
           </p>
         </section>
       </div>
@@ -690,13 +735,16 @@ function ProfileTab({ profile, onEdit }: { profile: MyProfile; onEdit: () => voi
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-700">
           <Icon name="key" className="h-[18px] w-[18px]" />
         </span>
-        <div>
+        <div className="flex-1">
           <p className="font-semibold">Your password</p>
           <p className="mt-1 text-sm text-muted">
-            Only HR can set or change staff portal passwords. If you&apos;ve forgotten yours, or
-            think someone else knows it, ask HR for a new one.
+            To change it, ask HR for a new one: they give you a temporary password, then you
+            choose your own when you next log in.
           </p>
         </div>
+        <button onClick={onAskPassword} className={SECONDARY_BUTTON}>
+          Ask for a new password
+        </button>
       </section>
     </div>
   );
@@ -820,5 +868,265 @@ function Heading({
       </span>
       {title}
     </h2>
+  );
+}
+
+// --- Requests ---------------------------------------------------------------
+
+function RequestsTab({
+  requests,
+  startWith,
+  onChanged,
+}: {
+  requests: Loaded<StaffRequest[]> & { reload: () => Promise<void> };
+  startWith: StaffRequestType | null;
+  onChanged: (message: string) => void;
+}) {
+  const [asking, setAsking] = useState<StaffRequestType | null>(startWith);
+  const [withdrawing, setWithdrawing] = useState<StaffRequest | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const withdraw = async (r: StaffRequest) => {
+    setWithdrawing(null);
+    setError(null);
+    try {
+      await apiSend(`/requests/${r.id}/cancel`, "PUT", {}, "Could not withdraw it");
+      onChanged("Request withdrawn.");
+      await requests.reload();
+    } catch (e) {
+      setError(describeError(e, "Could not withdraw it"));
+    }
+  };
+
+  return (
+    <div className="mt-6 flex flex-col gap-6">
+      {asking && (
+        <Modal title="Ask HR" onClose={() => setAsking(null)}>
+          <RequestForm
+            type={asking}
+            onCancel={() => setAsking(null)}
+            onSaved={() => {
+              setAsking(null);
+              onChanged("Request sent to HR. You'll see their reply here.");
+              void requests.reload();
+            }}
+          />
+        </Modal>
+      )}
+      {withdrawing && (
+        <ConfirmDialog
+          title="Withdraw request"
+          message={`Withdraw your request for ${REQUEST_TYPES[withdrawing.type].label.toLowerCase()}?`}
+          confirmLabel="Withdraw"
+          danger
+          onConfirm={() => withdraw(withdrawing)}
+          onClose={() => setWithdrawing(null)}
+        />
+      )}
+
+      <section>
+        <Heading icon="inbox" tint="bg-brand-soft text-brand-deep" title="Ask HR" />
+        <p className="mt-1 text-sm text-muted">Pick what you need. HR replies here.</p>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {(Object.keys(REQUEST_TYPES) as StaffRequestType[]).map((t) => (
+            <button
+              key={t}
+              onClick={() => setAsking(t)}
+              className="group flex flex-col items-start gap-1 rounded-3xl bg-white p-4 text-left shadow-soft ring-1 ring-line transition hover:-translate-y-0.5 hover:ring-brand-soft"
+            >
+              <span className="font-semibold">{REQUEST_TYPES[t].label}</span>
+              <span className="text-xs text-muted">{REQUEST_TYPES[t].hint}</span>
+              <span className="mt-1 text-sm font-semibold text-brand-deep group-hover:underline">
+                Ask →
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section>
+        <Heading icon="clock" tint="bg-amber-100 text-amber-800" title="My requests" />
+        {error && <p className="mt-3 text-sm text-red-700">{error}</p>}
+        <div className="mt-4">
+          {requests.failed ? (
+            <LoadError />
+          ) : !requests.data ? (
+            <Loading />
+          ) : requests.data.length === 0 ? (
+            <p className="text-sm text-muted">You haven&apos;t asked HR for anything yet.</p>
+          ) : (
+            <ul className="flex flex-col gap-3">
+              {requests.data.map((r) => (
+                <li key={r.id} className={`${CARD} text-sm`}>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-semibold">{REQUEST_TYPES[r.type].label}</p>
+                      <p className="text-xs text-muted">Sent {timeAgo(r.createdAt)}</p>
+                    </div>
+                    <span
+                      className={`rounded-full px-2.5 py-0.5 text-xs font-semibold capitalize ${REQUEST_STATUS_STYLES[r.status]}`}
+                    >
+                      {r.status === "open" ? "Waiting for HR" : r.status}
+                    </span>
+                  </div>
+                  {r.details && <p className="mt-2 whitespace-pre-line">{r.details}</p>}
+                  {r.response && (
+                    <p className="mt-3 rounded-2xl bg-surface-alt px-4 py-3">
+                      <span className="block text-xs font-semibold uppercase tracking-wide text-muted">
+                        HR replied {r.resolvedAt && timeAgo(r.resolvedAt)}
+                      </span>
+                      <span className="mt-1 block whitespace-pre-line">{r.response}</span>
+                    </p>
+                  )}
+                  {r.status === "open" && (
+                    <button
+                      onClick={() => setWithdrawing(r)}
+                      className="mt-3 font-medium text-red-700 hover:underline"
+                    >
+                      Withdraw
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RequestForm({
+  type,
+  onSaved,
+  onCancel,
+}: {
+  type: StaffRequestType;
+  onSaved: () => void;
+  onCancel: () => void;
+}) {
+  const info = REQUEST_TYPES[type];
+  const [details, setDetails] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await apiSend("/requests", "POST", { type, details }, "Could not send the request");
+      onSaved();
+    } catch (e) {
+      setError(describeError(e, "Could not send the request"));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form
+      className="flex flex-col gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
+      <p className="font-semibold">{info.label}</p>
+      <p className="text-sm text-muted">{info.hint}</p>
+      <label className="text-sm font-medium">
+        Details {!info.needsDetails && <span className="font-normal text-muted">(optional)</span>}
+        <textarea
+          autoFocus
+          required={info.needsDetails}
+          rows={4}
+          maxLength={2000}
+          value={details}
+          onChange={(e) => setDetails(e.target.value)}
+          className={INPUT}
+        />
+      </label>
+      {error && <p className="text-sm text-red-700">{error}</p>}
+      <div className="mt-2 flex justify-end gap-3">
+        <button type="button" onClick={onCancel} className={SECONDARY_BUTTON}>
+          Cancel
+        </button>
+        <button type="submit" disabled={saving} className={PRIMARY_BUTTON}>
+          {saving ? "Sending…" : "Send to HR"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// --- First login: choose your own password ----------------------------------
+
+/**
+ * Shown instead of the portal while someone is on HR's temporary password:
+ * they choose their own before they can do anything else.
+ */
+function ChooseOwnPassword({ name }: { name: string }) {
+  const [form, setForm] = useState({ currentPassword: "", newPassword: "", repeat: "" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (form.newPassword !== form.repeat) {
+      setError("The new passwords don't match");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      saveSession(
+        await apiSend<Session>("/me/password", "PUT", form, "Could not save your password"),
+      );
+      // Load the whole portal afresh, now that it is open to them.
+      window.location.reload();
+    } catch (e) {
+      setError(describeError(e, "Could not save your password"));
+      setSaving(false);
+    }
+  };
+
+  const field = (key: keyof typeof form, label: string, hint?: string, autoComplete = "new-password") => (
+    <label className="text-sm font-medium">
+      {label} {hint && <span className="font-normal text-muted">{hint}</span>}
+      <input
+        required
+        minLength={key === "currentPassword" ? undefined : 8}
+        type="password"
+        autoComplete={autoComplete}
+        value={form[key]}
+        onChange={(e) => setForm({ ...form, [key]: e.target.value })}
+        className={INPUT}
+      />
+    </label>
+  );
+
+  return (
+    <section className={`${CARD} mx-auto mt-8 max-w-md`}>
+      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-soft text-brand-deep">
+        <Icon name="key" className="h-6 w-6" />
+      </span>
+      <h1 className="mt-4 text-3xl font-semibold">Choose your own password</h1>
+      <p className="mt-2 text-sm text-muted">
+        Welcome, {name.split(" ")[0]}. HR gave you a temporary password. Choose one only you
+        know before you go on; HR won&apos;t be able to see it.
+      </p>
+      <form
+        className="mt-5 flex flex-col gap-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
+        {field("currentPassword", "Temporary password", "(the one HR gave you)", "current-password")}
+        {field("newPassword", "New password", "(at least 8 characters)")}
+        {field("repeat", "New password again")}
+        {error && <p className="text-sm text-red-700">{error}</p>}
+        <button type="submit" disabled={saving} className={`${PRIMARY_BUTTON} mt-2 h-12`}>
+          {saving ? "Saving…" : "Save and continue"}
+        </button>
+      </form>
+    </section>
   );
 }

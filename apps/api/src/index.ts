@@ -6,6 +6,7 @@ import {
   clearFailedLogins,
   createToken,
   employeeOnly,
+  employeeOnTemporaryPassword,
   hashPassword,
   isAdminPassword,
   isLockedOut,
@@ -54,6 +55,9 @@ import type {
   PayrollStatus,
   Payslip,
   PublicHoliday,
+  StaffRequest,
+  StaffRequestStatus,
+  StaffRequestType,
 } from "@hr/types";
 
 const app = express();
@@ -165,6 +169,7 @@ type EmployeeRow = {
   salt: string | null;
   password_hash: string | null;
   sessions_valid_after: Date;
+  must_change_password: boolean;
   deactivated_at: Date | null;
   annual_leave_taken: number;
   monthly_allowances?: number;
@@ -210,6 +215,7 @@ const toEmployee = (row: EmployeeRow): Employee => ({
   annualLeaveDays: row.annual_leave_days,
   annualLeaveTaken: row.annual_leave_taken,
   canLogIn: row.password_hash !== null,
+  mustChangePassword: row.must_change_password,
   ...(row.deactivated_at !== null
     ? { deactivatedAt: row.deactivated_at.toISOString() }
     : {}),
@@ -408,6 +414,7 @@ app.post("/auth/login", async (req, res) => {
   const password = String(req.body?.password ?? "");
   const email = String(req.body?.email ?? "").trim().toLowerCase();
   let session: Omit<Session, "iat" | "exp"> | null = null;
+  let mustChangePassword = false;
   if (!email && password && isAdminPassword(password)) {
     session = { role: "admin", name: "Owner" };
   } else if (email && password && req.body?.role === "admin") {
@@ -428,8 +435,10 @@ app.post("/auth/login", async (req, res) => {
     if (
       member &&
       passwordMatchesHash(password, member.salt!, member.password_hash!)
-    )
+    ) {
       session = { role: "employee", name: member.name, employeeId: member.id };
+      mustChangePassword = member.must_change_password;
+    }
   }
 
   if (!session) {
@@ -440,7 +449,12 @@ app.post("/auth/login", async (req, res) => {
     return;
   }
   clearFailedLogins(key);
-  res.json({ token: createToken(session), role: session.role, name: session.name });
+  res.json({
+    token: createToken(session),
+    role: session.role,
+    name: session.name,
+    mustChangePassword,
+  });
 });
 
 // --- Dashboard -------------------------------------------------------------
@@ -732,11 +746,12 @@ app.post("/employees", adminOnly, async (req, res) => {
   const items = Array.isArray(req.body?.items) ? readPayItems(req.body.items) : [];
   const id = randomUUID();
   await transaction(async (client) => {
-    const columns = [...EMPLOYEE_COLUMNS, "id", "salt", "password_hash"];
+    // A password HR gives is temporary: they choose their own when they log in.
+    const columns = [...EMPLOYEE_COLUMNS, "id", "salt", "password_hash", "must_change_password"];
     await client.query(
       `INSERT INTO employees (${columns.join(", ")})
        VALUES (${columns.map((_, i) => `$${i + 1}`).join(", ")})`,
-      [...values, id, login?.salt ?? null, login?.hash ?? null],
+      [...values, id, login?.salt ?? null, login?.hash ?? null, login !== null],
     );
     await savePayItems(client, id, items);
     await logActivity(
@@ -780,21 +795,33 @@ app.put("/employees/:id", adminOnly, async (req, res) => {
   res.json(toEmployee(await fetchEmployee(String(req.params.id))));
 });
 
-// Give an employee a (new) password for the staff portal.
-app.put("/employees/:id/password", adminOnly, async (req, res) => {
-  const password = String(req.body?.password ?? "");
+/**
+ * Gives an employee a temporary password: any login they had ends, and they
+ * choose their own password the next time they log in.
+ */
+async function setTemporaryPassword(
+  client: PoolClient,
+  res: express.Response,
+  employeeId: string,
+  password: string,
+) {
   checkPassword(password);
   const { salt, hash } = hashPassword(password);
-  await transaction(async (client) => {
-    // Any login they already had ends: the new password is the only way in.
-    const { rows } = await client.query<{ name: string }>(
-      `UPDATE employees SET salt = $2, password_hash = $3, sessions_valid_after = $4
-       WHERE id = $1 RETURNING name`,
-      [req.params.id, salt, hash, new Date()],
-    );
-    if (!rows[0]) throw new HttpError(404, "Employee not found");
-    await logActivity(client, res, `Set a new staff portal password for ${rows[0].name}`);
-  });
+  const { rows } = await client.query<{ name: string }>(
+    `UPDATE employees SET salt = $2, password_hash = $3, sessions_valid_after = $4,
+       must_change_password = true
+     WHERE id = $1 RETURNING name`,
+    [employeeId, salt, hash, new Date()],
+  );
+  if (!rows[0]) throw new HttpError(404, "Employee not found");
+  await logActivity(client, res, `Gave ${rows[0].name} a temporary staff portal password`);
+  return rows[0].name;
+}
+
+app.put("/employees/:id/password", adminOnly, async (req, res) => {
+  await transaction((client) =>
+    setTemporaryPassword(client, res, String(req.params.id), String(req.body?.password ?? "")),
+  );
   res.sendStatus(204);
 });
 
@@ -950,7 +977,8 @@ app.put("/employees/:id/pay-items", adminOnly, async (req, res) => {
 
 // --- Staff portal ----------------------------------------------------------
 
-app.get("/me", employeeOnly, async (_req, res) => {
+// Works on a temporary password too, so the portal can ask for a new one.
+app.get("/me", employeeOnTemporaryPassword, async (_req, res) => {
   const row = await fetchEmployee(sessionOf(res).employeeId!);
   const employee = toEmployee(row);
   const profile: MyProfile = {
@@ -960,8 +988,40 @@ app.get("/me", employeeOnly, async (_req, res) => {
   res.json(profile);
 });
 
-// Staff portal passwords are set by HR only (PUT /employees/:id/password), so
-// there is no route for employees to change their own.
+// Staff choose their own password only to replace a temporary one from HR.
+// Otherwise passwords change through HR (a password request), so a lost
+// or shared login can always be taken back by HR.
+app.put("/me/password", employeeOnTemporaryPassword, async (req, res) => {
+  const current = String(req.body?.currentPassword ?? "");
+  const next = String(req.body?.newPassword ?? "");
+  const id = sessionOf(res).employeeId!;
+  const { rows } = await db.query<EmployeeRow>("SELECT * FROM employees WHERE id = $1", [id]);
+  const me = rows[0];
+  if (!me.must_change_password)
+    throw new HttpError(403, "To change your password, send HR a password request");
+  if (!passwordMatchesHash(current, me.salt!, me.password_hash!))
+    throw new HttpError(400, "The temporary password is wrong");
+  checkPassword(next);
+  if (next === current)
+    throw new HttpError(400, "Choose a new password, not the one HR gave you");
+  const { salt, hash } = hashPassword(next);
+  await transaction(async (client) => {
+    // Other logins on the temporary password end; this one carries on.
+    await client.query(
+      `UPDATE employees SET salt = $2, password_hash = $3, sessions_valid_after = $4,
+         must_change_password = false
+       WHERE id = $1`,
+      [id, salt, hash, new Date()],
+    );
+    await logActivity(client, res, "Chose their own staff portal password");
+  });
+  res.json({
+    token: createToken({ role: "employee", name: me.name, employeeId: id }),
+    role: "employee",
+    name: me.name,
+    mustChangePassword: false,
+  });
+});
 
 // Employees keep their own phone, address and emergency contact up to date.
 // Bank details stay with HR, so nobody can redirect a salary from the portal.
@@ -2009,6 +2069,193 @@ app.put("/admins/:id/active", adminOnly, async (req, res) => {
   res.json(toAdmin(row));
 });
 
+// --- Requests to HR --------------------------------------------------------
+
+type RequestRow = {
+  id: string;
+  employee_id: string;
+  employee_name: string;
+  employee_no: string;
+  type: StaffRequestType;
+  details: string | null;
+  status: StaffRequestStatus;
+  response: string | null;
+  resolved_by: string | null;
+  resolved_at: Date | null;
+  created_at: Date;
+};
+
+const toRequest = (row: RequestRow): StaffRequest => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  employeeName: row.employee_name,
+  employeeNo: row.employee_no,
+  type: row.type,
+  ...(row.details !== null ? { details: row.details } : {}),
+  status: row.status,
+  ...(row.response !== null ? { response: row.response } : {}),
+  ...(row.resolved_by !== null ? { resolvedBy: row.resolved_by } : {}),
+  ...(row.resolved_at !== null ? { resolvedAt: row.resolved_at.toISOString() } : {}),
+  createdAt: row.created_at.toISOString(),
+});
+
+const REQUEST_SELECT = `
+  SELECT r.*, e.name AS employee_name, e.employee_no
+  FROM staff_requests r JOIN employees e ON e.id = r.employee_id`;
+
+const REQUEST_LABELS: Record<StaffRequestType, string> = {
+  password_reset: "a new password",
+  bank_change: "a bank account change",
+  details_correction: "a correction to their details",
+  letter: "a letter",
+  other: "something else",
+};
+
+const fetchRequest = async (client: PoolClient | typeof db, id: string) =>
+  (await client.query<RequestRow>(`${REQUEST_SELECT} WHERE r.id = $1`, [id])).rows[0];
+
+/** Opens a request, unless the same kind is already waiting. */
+async function openRequest(
+  client: PoolClient,
+  employeeId: string,
+  type: StaffRequestType,
+  details: string | null,
+) {
+  if (type !== "other") {
+    const { rowCount } = await client.query(
+      "SELECT 1 FROM staff_requests WHERE employee_id = $1 AND type = $2 AND status = 'open'",
+      [employeeId, type],
+    );
+    if (rowCount) return null;
+  }
+  const id = randomUUID();
+  await client.query(
+    `INSERT INTO staff_requests (id, employee_id, type, details) VALUES ($1, $2, $3, $4)`,
+    [id, employeeId, type, details],
+  );
+  return fetchRequest(client, id);
+}
+
+app.get("/requests", adminOnly, async (_req, res) => {
+  const { rows } = await db.query<RequestRow>(
+    `${REQUEST_SELECT} ORDER BY r.status = 'open' DESC, r.created_at DESC LIMIT 300`,
+  );
+  res.json(rows.map(toRequest));
+});
+
+app.get("/requests/mine", employeeOnly, async (_req, res) => {
+  const { rows } = await db.query<RequestRow>(
+    `${REQUEST_SELECT} WHERE r.employee_id = $1 ORDER BY r.created_at DESC`,
+    [sessionOf(res).employeeId],
+  );
+  res.json(rows.map(toRequest));
+});
+
+const REQUEST_TYPES = Object.keys(REQUEST_LABELS) as StaffRequestType[];
+
+app.post("/requests", employeeOnly, async (req, res) => {
+  const type = String(req.body?.type ?? "") as StaffRequestType;
+  const details = optionalText(req.body?.details);
+  if (!REQUEST_TYPES.includes(type)) throw new HttpError(400, "Choose what you need");
+  if (details && details.length > 2000)
+    throw new HttpError(400, "Keep the details under 2,000 characters");
+  if (!details && (type === "bank_change" || type === "details_correction" || type === "other"))
+    throw new HttpError(400, "Say what you need, so HR can help");
+  const row = await transaction(async (client) => {
+    const opened = await openRequest(client, sessionOf(res).employeeId!, type, details);
+    if (!opened)
+      throw new HttpError(409, "You already have one of these waiting. HR will get back to you.");
+    await logActivity(client, res, `Asked HR for ${REQUEST_LABELS[type]}`);
+    return opened;
+  });
+  res.status(201).json(toRequest(row));
+});
+
+app.put("/requests/:id/cancel", employeeOnly, async (req, res) => {
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ type: StaffRequestType }>(
+      `UPDATE staff_requests SET status = 'cancelled', resolved_at = now()
+       WHERE id = $1 AND employee_id = $2 AND status = 'open' RETURNING type`,
+      [req.params.id, sessionOf(res).employeeId],
+    );
+    if (!rows[0]) throw new HttpError(404, "This request can no longer be cancelled");
+    await logActivity(client, res, `Withdrew their request for ${REQUEST_LABELS[rows[0].type]}`);
+  });
+  res.sendStatus(204);
+});
+
+// HR closes a request as done or declined, with a reply the employee sees.
+// For a password request, `password` sets their temporary password in the
+// same step.
+app.put("/requests/:id", adminOnly, async (req, res) => {
+  const status = String(req.body?.status ?? "") as StaffRequestStatus;
+  const response = optionalText(req.body?.response);
+  const password = optionalText(req.body?.password);
+  if (status !== "done" && status !== "declined")
+    throw new HttpError(400, "Mark it done or declined");
+  if (status === "declined" && !response)
+    throw new HttpError(400, "Say why, so they know what to do next");
+  const row = await transaction(async (client) => {
+    const request = await fetchRequest(client, String(req.params.id));
+    if (!request || request.status !== "open")
+      throw new HttpError(404, "No open request with that id");
+    if (password && status === "done")
+      await setTemporaryPassword(client, res, request.employee_id, password);
+    await client.query(
+      `UPDATE staff_requests SET status = $2, response = $3, resolved_by = $4,
+         resolved_at = now()
+       WHERE id = $1`,
+      [request.id, status, response, actorOf(sessionOf(res))],
+    );
+    await logActivity(
+      client,
+      res,
+      `${status === "done" ? "Completed" : "Declined"} ${request.employee_name}'s request for ` +
+        `${REQUEST_LABELS[request.type]}${response ? `: ${response}` : ""}`,
+    );
+    return fetchRequest(client, request.id);
+  });
+  res.json(toRequest(row));
+});
+
+// For someone locked out: asks HR for a new password without logging in. The
+// answer is the same whether or not the email is on file, so it can't be
+// used to find out who works here, and it is limited like logins.
+app.post("/auth/password-request", async (req, res) => {
+  const key = `password-request:${req.ip ?? "unknown"}`;
+  if (isLockedOut(key)) {
+    res.status(429).json({ error: `Too many requests. Try again in ${LOCKOUT_MINUTES} minutes.` });
+    return;
+  }
+  recordFailedLogin(key);
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  if (email) {
+    const { rows } = await db.query<{ id: string; name: string }>(
+      `SELECT id, name FROM employees WHERE email = $1 AND deactivated_at IS NULL
+         AND (end_date IS NULL OR end_date >= $2)`,
+      [email, today()],
+    );
+    if (rows[0])
+      await transaction(async (client) => {
+        const opened = await openRequest(
+          client,
+          rows[0].id,
+          "password_reset",
+          "Sent from the login page (forgot password)",
+        );
+        if (opened)
+          await client.query("INSERT INTO activity_log (actor, summary) VALUES ($1, $2)", [
+            `${rows[0].name} (login page)`,
+            "Asked HR for a new password",
+          ]);
+      });
+  }
+  res.json({
+    message:
+      "If that email belongs to a member of staff, HR has been asked to give you a new password. They will tell you it in person.",
+  });
+});
+
 // --- Noticeboard -----------------------------------------------------------
 
 type AnnouncementRow = {
@@ -2173,6 +2420,7 @@ app.get("/backup", adminOnly, async (_req, res) => {
     "activity_log",
     "announcements",
     "employee_photos",
+    "staff_requests",
   ];
   const data: Record<string, unknown[]> = {};
   for (const table of tables) {
