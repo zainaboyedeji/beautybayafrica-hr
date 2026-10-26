@@ -27,7 +27,7 @@ import LeaveForm from "../components/leave-form";
 import Modal from "../components/modal";
 import { Notice } from "../components/notice";
 import NoticeCard, { timeAgo } from "../components/notice-card";
-import PayslipView from "../components/payslip-view";
+import PayslipView, { printPayslip } from "../components/payslip-view";
 import PasswordInput from "../components/password-input";
 import PhotoPicker from "../components/photo-picker";
 import StatusBadge from "../components/status-badge";
@@ -304,7 +304,7 @@ export default function MyPortalPage() {
           <Modal wide title="Payslip" onClose={() => setViewing(null)}>
             <PayslipView payslip={viewing} />
             <div className="no-print mt-5 flex justify-end">
-              <button onClick={() => window.print()} className={SECONDARY_BUTTON}>
+              <button onClick={() => printPayslip(viewing)} className={SECONDARY_BUTTON}>
                 <Icon name="printer" className="h-4 w-4" />
                 Print or save as PDF
               </button>

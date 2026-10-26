@@ -73,22 +73,34 @@ body {
   }
 }
 
-/* Printing a payslip prints only the payslip. */
+/* The payslip's print copy: hidden on screen, the only thing on the page when printing. */
+.print-root {
+  display: none;
+}
+
+@page {
+  size: A4;
+  margin: 14mm;
+}
+
 @media print {
+  html,
   body {
-    background: #ffffff;
+    background: #ffffff !important;
+    height: auto !important;
+    overflow: visible !important;
   }
-  body * {
-    visibility: hidden;
+  body > *:not(.print-root) {
+    display: none !important;
   }
-  .print-area,
-  .print-area * {
-    visibility: visible;
+  .print-root {
+    display: block;
+    /* Keep the PAID stamp and the net pay box in colour. */
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
-  .print-area {
-    position: absolute;
-    inset: 0 auto auto 0;
-    width: 100%;
+  .print-root .print-keep {
+    break-inside: avoid;
   }
   .no-print {
     display: none !important;
