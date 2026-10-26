@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import type { LeaveRequest, MyProfile, Payslip } from "@hr/types";
+import type { Announcement, LeaveRequest, MyProfile, Payslip } from "@hr/types";
 import Avatar from "../components/avatar";
 import ConfirmDialog from "../components/confirm-dialog";
 import Guarantors from "../components/guarantors";
@@ -19,6 +19,7 @@ import Icon, { type IconName } from "../components/icons";
 import LeaveForm from "../components/leave-form";
 import Modal from "../components/modal";
 import { Notice } from "../components/notice";
+import NoticeCard from "../components/notice-card";
 import PayslipView from "../components/payslip-view";
 import PhotoPicker from "../components/photo-picker";
 import StatusBadge from "../components/status-badge";
@@ -33,7 +34,7 @@ import {
   money,
   useLoad,
 } from "../lib/api";
-import { logOut, saveSession, type Session } from "../lib/auth";
+import { logOut } from "../lib/auth";
 import {
   EMPLOYMENT_LABELS,
   formatDay,
@@ -75,7 +76,6 @@ export default function MyPortalPage() {
   const [cancelling, setCancelling] = useState<LeaveRequest | null>(null);
   const [viewing, setViewing] = useState<Payslip | null>(null);
   const [editing, setEditing] = useState(false);
-  const [changingPassword, setChangingPassword] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -234,11 +234,7 @@ export default function MyPortalPage() {
               />
             )}
             {tab === "profile" && (
-              <ProfileTab
-                profile={profile}
-                onEdit={() => setEditing(true)}
-                onChangePassword={() => setChangingPassword(true)}
-              />
+              <ProfileTab profile={profile} onEdit={() => setEditing(true)} />
             )}
           </>
         )}
@@ -290,17 +286,6 @@ export default function MyPortalPage() {
             />
           </Modal>
         )}
-        {changingPassword && (
-          <Modal title="Change password" onClose={() => setChangingPassword(false)}>
-            <PasswordForm
-              onCancel={() => setChangingPassword(false)}
-              onSaved={() => {
-                setChangingPassword(false);
-                setNotice("Password changed. You've been logged out on any other devices.");
-              }}
-            />
-          </Modal>
-        )}
       </main>
     </div>
   );
@@ -325,7 +310,7 @@ function HomeTab({
   earnedThisYear: number;
   nextHoliday?: { day: string; name: string };
   upcomingLeave: LeaveRequest[];
-  notices: Loaded<{ id: string; title: string; body: string; postedBy: string; createdAt: string }[]>;
+  notices: Loaded<Announcement[]>;
   onViewPayslip: (p: Payslip) => void;
   onGo: (tab: Tab) => void;
 }) {
@@ -417,15 +402,7 @@ function HomeTab({
             ) : notices.data.length === 0 ? (
               <p className={`${CARD} text-sm text-muted`}>No notices from HR right now.</p>
             ) : (
-              notices.data.map((n) => (
-                <article key={n.id} className={CARD}>
-                  <h3 className="font-semibold">{n.title}</h3>
-                  <p className="mt-2 whitespace-pre-line text-sm">{n.body}</p>
-                  <p className="mt-3 text-xs text-muted">
-                    {n.postedBy} · {formatDay(new Date(n.createdAt).toLocaleDateString("en-CA"))}
-                  </p>
-                </article>
-              ))
+              notices.data.map((n) => <NoticeCard key={n.id} notice={n} />)
             )}
           </div>
         </section>
@@ -647,15 +624,7 @@ function Figure({ label, value, strong }: { label: string; value: string; strong
 /** "••••6789": enough to recognise the account, not enough to misuse it. */
 const masked = (account?: string) => (account ? `••••${account.slice(-4)}` : "Not given");
 
-function ProfileTab({
-  profile,
-  onEdit,
-  onChangePassword,
-}: {
-  profile: MyProfile;
-  onEdit: () => void;
-  onChangePassword: () => void;
-}) {
+function ProfileTab({ profile, onEdit }: { profile: MyProfile; onEdit: () => void }) {
   return (
     <div className="mt-6 flex flex-col gap-6">
       <div className="grid gap-6 lg:grid-cols-2">
@@ -717,16 +686,17 @@ function ProfileTab({
         </div>
       </section>
 
-      <section className={`${CARD} flex flex-wrap items-center justify-between gap-3`}>
+      <section className={`${CARD} flex items-start gap-3`}>
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-700">
+          <Icon name="key" className="h-[18px] w-[18px]" />
+        </span>
         <div>
-          <Heading icon="key" tint="bg-slate-100 text-slate-700" title="Password" small />
+          <p className="font-semibold">Your password</p>
           <p className="mt-1 text-sm text-muted">
-            Changing it logs you out on any other phone or computer.
+            Only HR can set or change staff portal passwords. If you&apos;ve forgotten yours, or
+            think someone else knows it, ask HR for a new one.
           </p>
         </div>
-        <button onClick={onChangePassword} className={SECONDARY_BUTTON}>
-          Change password
-        </button>
       </section>
     </div>
   );
@@ -850,85 +820,5 @@ function Heading({
       </span>
       {title}
     </h2>
-  );
-}
-
-function PasswordForm({ onSaved, onCancel }: { onSaved: () => void; onCancel: () => void }) {
-  const [form, setForm] = useState({ currentPassword: "", newPassword: "", repeat: "" });
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = async () => {
-    if (form.newPassword !== form.repeat) {
-      setError("The new passwords don't match");
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
-      // Logins on other devices end; this one gets a fresh token.
-      saveSession(
-        await apiSend<Session>("/me/password", "PUT", form, "Could not change password"),
-      );
-      onSaved();
-    } catch (e) {
-      setError(describeError(e, "Could not change password"));
-      setSaving(false);
-    }
-  };
-
-  return (
-    <form
-      className="flex flex-col gap-3"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void submit();
-      }}
-    >
-      <label className="text-sm font-medium">
-        Current password
-        <input
-          autoFocus
-          required
-          type="password"
-          autoComplete="current-password"
-          value={form.currentPassword}
-          onChange={(e) => setForm({ ...form, currentPassword: e.target.value })}
-          className={INPUT}
-        />
-      </label>
-      <label className="text-sm font-medium">
-        New password <span className="font-normal text-muted">(at least 8 characters)</span>
-        <input
-          required
-          minLength={8}
-          type="password"
-          autoComplete="new-password"
-          value={form.newPassword}
-          onChange={(e) => setForm({ ...form, newPassword: e.target.value })}
-          className={INPUT}
-        />
-      </label>
-      <label className="text-sm font-medium">
-        New password again
-        <input
-          required
-          type="password"
-          autoComplete="new-password"
-          value={form.repeat}
-          onChange={(e) => setForm({ ...form, repeat: e.target.value })}
-          className={INPUT}
-        />
-      </label>
-      {error && <p className="text-sm text-red-700">{error}</p>}
-      <div className="mt-2 flex justify-end gap-3">
-        <button type="button" onClick={onCancel} className={SECONDARY_BUTTON}>
-          Cancel
-        </button>
-        <button type="submit" disabled={saving} className={PRIMARY_BUTTON}>
-          {saving ? "Saving…" : "Change password"}
-        </button>
-      </div>
-    </form>
   );
 }

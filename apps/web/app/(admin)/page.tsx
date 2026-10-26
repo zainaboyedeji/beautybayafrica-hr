@@ -2,9 +2,12 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import type { Department, Employee } from "@hr/types";
+import type { Announcement, AnnouncementCategory, Department, Employee } from "@hr/types";
 import Avatar, { Person } from "../components/avatar";
-import { CARD, INPUT, PRIMARY_BUTTON } from "../components/form-styles";
+import ConfirmDialog from "../components/confirm-dialog";
+import { CARD, INPUT, PRIMARY_BUTTON, SECONDARY_BUTTON } from "../components/form-styles";
+import NoticeCard, { NOTICE_TYPES } from "../components/notice-card";
+import { Notice } from "../components/notice";
 import Icon, { type IconName } from "../components/icons";
 import {
   apiSend,
@@ -162,8 +165,8 @@ export default function DashboardPage() {
           </Link>
         </section>
 
-        <Noticeboard />
         <Birthdays />
+        <Noticeboard />
       </div>
     </div>
   );
@@ -172,16 +175,21 @@ export default function DashboardPage() {
 /** HR's notices, which every employee sees on their staff portal home. */
 function Noticeboard() {
   const notices = useLoad(fetchAnnouncements);
-  const [form, setForm] = useState({ title: "", body: "" });
+  const blank = { title: "", body: "", category: "general" as AnnouncementCategory, pinned: false };
+  const [form, setForm] = useState(blank);
+  const [editing, setEditing] = useState<Announcement | null>(null);
+  const [removing, setRemoving] = useState<Announcement | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const run = async (work: () => Promise<unknown>, fallback: string) => {
+  const run = async (work: () => Promise<unknown>, fallback: string, done: string) => {
     setSaving(true);
     setError(null);
     try {
       await work();
       await notices.reload();
+      setNotice(done);
       return true;
     } catch (e) {
       setError(describeError(e, fallback));
@@ -191,75 +199,206 @@ function Noticeboard() {
     }
   };
 
+  const reset = () => {
+    setEditing(null);
+    setForm(blank);
+  };
+  const submit = async () => {
+    const ok = editing
+      ? await run(
+          () => apiSend(`/announcements/${editing.id}`, "PUT", form, "Could not save"),
+          "Could not save",
+          "Notice updated.",
+        )
+      : await run(
+          () => apiSend("/announcements", "POST", form, "Could not post"),
+          "Could not post",
+          "Notice posted. Staff see it on their portal home.",
+        );
+    if (ok) reset();
+  };
+  const togglePin = (n: Announcement) =>
+    run(
+      () => apiSend(`/announcements/${n.id}`, "PUT", { ...n, pinned: !n.pinned }, "Could not save"),
+      "Could not save",
+      n.pinned ? "Notice unpinned." : "Notice pinned to the top.",
+    );
+
   return (
-    <section className={`${CARD} lg:col-span-2`}>
-      <CardTitle icon="megaphone" tint="bg-brand-soft text-brand-deep" title="Noticeboard" />
-      <p className="mt-1 text-sm text-muted">Everyone sees these on their staff portal home.</p>
-      <form
-        className="mt-4 flex flex-col gap-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void run(() => apiSend("/announcements", "POST", form, "Could not post"), "Could not post").then(
-            (ok) => ok && setForm({ title: "", body: "" }),
-          );
-        }}
-      >
-        <input
-          required
-          maxLength={120}
-          placeholder="Title, e.g. Office closed on Friday"
-          value={form.title}
-          onChange={(e) => setForm({ ...form, title: e.target.value })}
-          className={INPUT}
+    <section className={`${CARD} lg:col-span-3`}>
+      {removing && (
+        <ConfirmDialog
+          title="Take down notice"
+          message={`Take down "${removing.title}"? Staff will no longer see it.`}
+          confirmLabel="Take down"
+          danger
+          onConfirm={async () => {
+            const n = removing;
+            setRemoving(null);
+            if (editing?.id === n.id) reset();
+            await run(
+              () => apiSend(`/announcements/${n.id}`, "DELETE", undefined, "Could not take it down"),
+              "Could not take it down",
+              "Notice taken down.",
+            );
+          }}
+          onClose={() => setRemoving(null)}
         />
-        <textarea
-          required
-          rows={3}
-          maxLength={2000}
-          placeholder="The message for all staff"
-          value={form.body}
-          onChange={(e) => setForm({ ...form, body: e.target.value })}
-          className={INPUT}
-        />
-        {error && <p className="text-sm text-red-700">{error}</p>}
-        <button type="submit" disabled={saving} className={`${PRIMARY_BUTTON} self-end`}>
-          <Icon name="megaphone" className="h-4 w-4" />
-          {saving ? "Posting…" : "Post notice"}
-        </button>
-      </form>
-      {notices.failed ? (
-        <LoadError />
-      ) : !notices.data ? (
-        <Loading />
-      ) : notices.data.length === 0 ? (
-        <Empty text="No notices yet." />
-      ) : (
-        <ul className="mt-4 divide-y divide-line">
-          {notices.data.map((n) => (
-            <li key={n.id} className="flex items-start justify-between gap-3 py-3 text-sm">
-              <span className="min-w-0">
-                <span className="block font-semibold">{n.title}</span>
-                <span className="block whitespace-pre-line">{n.body}</span>
-                <span className="mt-1 block text-xs text-muted">
-                  {n.postedBy} · {formatDay(new Date(n.createdAt).toLocaleDateString("en-CA"))}
-                </span>
-              </span>
-              <button
-                disabled={saving}
-                onClick={() =>
-                  void run(
-                    () => apiSend(`/announcements/${n.id}`, "DELETE", undefined, "Could not take it down"),
-                    "Could not take it down",
-                  )
-                }
-                className="shrink-0 font-medium text-red-700 hover:underline"
-              >
-                Take down
-              </button>
-            </li>
-          ))}
-        </ul>
       )}
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <CardTitle icon="megaphone" tint="bg-brand-soft text-brand-deep" title="Noticeboard" />
+          <p className="mt-1 text-sm text-muted">
+            Everyone sees these on their staff portal home. Pinned notices stay at the top.
+          </p>
+        </div>
+        {notices.data && (
+          <span className="rounded-full bg-surface-alt px-3 py-1 text-xs font-semibold text-muted">
+            {notices.data.length} live · {notices.data.filter((n) => n.pinned).length} pinned
+          </span>
+        )}
+      </div>
+
+      <div className="mt-5 grid gap-6 lg:grid-cols-2">
+        <form
+          className="flex flex-col gap-3 rounded-3xl bg-surface-alt/70 p-5 ring-1 ring-line"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit();
+          }}
+        >
+          <p className="text-sm font-semibold">{editing ? "Edit notice" : "New notice"}</p>
+          <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Type of notice">
+            {(Object.keys(NOTICE_TYPES) as AnnouncementCategory[]).map((c) => {
+              const type = NOTICE_TYPES[c];
+              const on = form.category === c;
+              return (
+                <button
+                  key={c}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  onClick={() => setForm({ ...form, category: c })}
+                  className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-sm font-semibold ring-1 transition ${
+                    on ? `${type.tint} ring-transparent shadow-sm` : "bg-white text-muted ring-line hover:text-ink"
+                  }`}
+                >
+                  <Icon name={type.icon} className="h-4 w-4" />
+                  {type.label}
+                </button>
+              );
+            })}
+          </div>
+          <input
+            required
+            maxLength={120}
+            placeholder="Title, e.g. Office closed on Friday"
+            value={form.title}
+            onChange={(e) => setForm({ ...form, title: e.target.value })}
+            className={INPUT}
+          />
+          <div>
+            <textarea
+              required
+              rows={5}
+              maxLength={2000}
+              placeholder="The message for all staff"
+              value={form.body}
+              onChange={(e) => setForm({ ...form, body: e.target.value })}
+              className={INPUT}
+            />
+            <p className="mt-1 text-right text-xs text-muted">{form.body.length} / 2000</p>
+          </div>
+          <label className="flex items-center gap-2 text-sm font-medium">
+            <input
+              type="checkbox"
+              checked={form.pinned}
+              onChange={(e) => setForm({ ...form, pinned: e.target.checked })}
+              className="h-4 w-4 accent-brand-deep"
+            />
+            <Icon name="pin" className="h-4 w-4 text-brand-deep" />
+            Pin to the top
+          </label>
+          {error && <p className="text-sm text-red-700">{error}</p>}
+          <div className="flex justify-end gap-3">
+            {editing && (
+              <button type="button" onClick={reset} className={SECONDARY_BUTTON}>
+                Cancel
+              </button>
+            )}
+            <button type="submit" disabled={saving} className={PRIMARY_BUTTON}>
+              <Icon name="megaphone" className="h-4 w-4" />
+              {saving ? "Saving…" : editing ? "Save changes" : "Post notice"}
+            </button>
+          </div>
+        </form>
+
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted">
+            Preview: how staff will see it
+          </p>
+          <NoticeCard
+            notice={{
+              ...form,
+              title: form.title || "Your title",
+              body: form.body || "Your message shows here as you type.",
+              postedBy: editing?.postedBy ?? "You",
+              createdAt: editing?.createdAt ?? new Date().toISOString(),
+              ...(editing ? { updatedAt: new Date().toISOString() } : {}),
+            }}
+          />
+        </div>
+      </div>
+
+      <Notice text={notice} />
+      <div className="mt-6">
+        <p className="mb-3 text-sm font-semibold">On the board</p>
+        {notices.failed ? (
+          <LoadError />
+        ) : !notices.data ? (
+          <Loading />
+        ) : notices.data.length === 0 ? (
+          <Empty text="No notices yet. Post the first one above." />
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2">
+            {notices.data.map((n) => (
+              <NoticeCard
+                key={n.id}
+                notice={n}
+                actions={
+                  <>
+                    <button
+                      disabled={saving}
+                      onClick={() => {
+                        setEditing(n);
+                        setForm({ title: n.title, body: n.body, category: n.category, pinned: n.pinned });
+                        setNotice(null);
+                      }}
+                      className="font-semibold text-brand-deep hover:underline"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      disabled={saving}
+                      onClick={() => void togglePin(n)}
+                      className="font-semibold text-brand-deep hover:underline"
+                    >
+                      {n.pinned ? "Unpin" : "Pin"}
+                    </button>
+                    <button
+                      disabled={saving}
+                      onClick={() => setRemoving(n)}
+                      className="font-semibold text-red-700 hover:underline"
+                    >
+                      Take down
+                    </button>
+                  </>
+                }
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </section>
   );
 }
@@ -275,7 +414,7 @@ function Birthdays() {
     .sort((a, b) => a.dateOfBirth!.slice(8).localeCompare(b.dateOfBirth!.slice(8)));
 
   return (
-    <section className={`${CARD} bg-gradient-to-br from-white to-rose-50`}>
+    <section className={`${CARD} bg-gradient-to-br from-white to-rose-50 lg:col-span-3`}>
       <CardTitle icon="sparkle" tint="bg-rose-100 text-rose-700" title="Birthdays this month" />
       {employees.failed ? (
         <LoadError />
@@ -284,7 +423,7 @@ function Birthdays() {
       ) : birthdays.length === 0 ? (
         <Empty text="No birthdays this month (or no dates of birth entered yet)." />
       ) : (
-        <ul className="mt-4 flex flex-col gap-3 text-sm">
+        <ul className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
           {birthdays.map((e) => {
             const day = Number(e.dateOfBirth!.slice(8));
             return (

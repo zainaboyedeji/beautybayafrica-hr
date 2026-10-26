@@ -62,8 +62,10 @@ month** with a reason, undo the payments that need changing, fix them and pay ag
 year, the next public holiday, HR's notices and their upcoming leave), ask for and
 cancel leave, view and print payslips with year-to-date totals, add a profile
 photo, keep their phone, address, date of birth and emergency contact up to date,
-and manage their guarantors. Bank details stay with HR and are shown masked. HR
-posts notices on the dashboard's **Noticeboard**, which also lists birthdays.
+and manage their guarantors. Bank details and passwords stay with HR: staff see
+their account masked, and only HR sets portal passwords (Employees → **Portal**).
+HR posts notices on the dashboard's **Noticeboard** (General, Important, Event or
+Celebration; pinned ones stay on top), which also lists birthdays.
 
 **Records.** Every change (who, what, when) goes in the **Activity** log, which
 can't be edited. **Settings → Download backup** saves all the data as one file:

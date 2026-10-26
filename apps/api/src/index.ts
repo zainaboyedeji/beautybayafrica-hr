@@ -34,6 +34,7 @@ import type {
   Activity,
   Admin,
   Announcement,
+  AnnouncementCategory,
   Dashboard,
   Guarantor,
   Day,
@@ -959,34 +960,8 @@ app.get("/me", employeeOnly, async (_req, res) => {
   res.json(profile);
 });
 
-app.put("/me/password", employeeOnly, async (req, res) => {
-  const current = String(req.body?.currentPassword ?? "");
-  const next = String(req.body?.newPassword ?? "");
-  const { rows } = await db.query<EmployeeRow>(
-    "SELECT * FROM employees WHERE id = $1",
-    [sessionOf(res).employeeId],
-  );
-  const me = rows[0];
-  if (!passwordMatchesHash(current, me.salt!, me.password_hash!)) {
-    res.status(400).json({ error: "Your current password is wrong" });
-    return;
-  }
-  checkPassword(next);
-  const { salt, hash } = hashPassword(next);
-  // Logins on other devices end; this one carries on with a fresh token.
-  await db.query(
-    `UPDATE employees SET salt = $2, password_hash = $3, sessions_valid_after = $4
-     WHERE id = $1`,
-    [me.id, salt, hash, new Date()],
-  );
-  await logActivity(db, res, "Changed their staff portal password");
-  const session = sessionOf(res);
-  res.json({
-    token: createToken({ role: "employee", name: session.name, employeeId: me.id }),
-    role: "employee",
-    name: session.name,
-  });
-});
+// Staff portal passwords are set by HR only (PUT /employees/:id/password), so
+// there is no route for employees to change their own.
 
 // Employees keep their own phone, address and emergency contact up to date.
 // Bank details stay with HR, so nobody can redirect a salary from the portal.
@@ -2040,41 +2015,74 @@ type AnnouncementRow = {
   id: string;
   title: string;
   body: string;
+  category: AnnouncementCategory;
+  pinned: boolean;
   posted_by: string;
   created_at: Date;
+  updated_at: Date | null;
 };
 
 const toAnnouncement = (row: AnnouncementRow): Announcement => ({
   id: row.id,
   title: row.title,
   body: row.body,
+  category: row.category,
+  pinned: row.pinned,
   postedBy: row.posted_by,
   createdAt: row.created_at.toISOString(),
+  ...(row.updated_at !== null ? { updatedAt: row.updated_at.toISOString() } : {}),
 });
 
+const NOTICE_CATEGORIES: AnnouncementCategory[] = ["general", "important", "event", "celebration"];
+
+/** A notice's fields from a request body, checked. */
+const readNotice = (body: Record<string, unknown> | undefined) => {
+  const title = String(body?.title ?? "").trim();
+  const text = String(body?.body ?? "").trim();
+  const category = String(body?.category ?? "general") as AnnouncementCategory;
+  if (!title || !text) throw new HttpError(400, "Enter a title and the message");
+  if (title.length > 120) throw new HttpError(400, "Keep the title under 120 characters");
+  if (text.length > 2000) throw new HttpError(400, "Keep the message under 2,000 characters");
+  if (!NOTICE_CATEGORIES.includes(category)) throw new HttpError(400, "Choose the type of notice");
+  return { title, body: text, category, pinned: body?.pinned === true };
+};
+
+// Pinned notices first, then the newest.
 app.get("/announcements", anyone, async (_req, res) => {
   const { rows } = await db.query<AnnouncementRow>(
-    "SELECT * FROM announcements ORDER BY created_at DESC LIMIT 20",
+    "SELECT * FROM announcements ORDER BY pinned DESC, created_at DESC LIMIT 30",
   );
   res.json(rows.map(toAnnouncement));
 });
 
 app.post("/announcements", adminOnly, async (req, res) => {
-  const title = String(req.body?.title ?? "").trim();
-  const body = String(req.body?.body ?? "").trim();
-  if (!title || !body) throw new HttpError(400, "Enter a title and the message");
-  if (title.length > 120) throw new HttpError(400, "Keep the title under 120 characters");
-  if (body.length > 2000) throw new HttpError(400, "Keep the message under 2,000 characters");
+  const n = readNotice(req.body);
   const row = await transaction(async (client) => {
     const { rows } = await client.query<AnnouncementRow>(
-      `INSERT INTO announcements (id, title, body, posted_by)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [randomUUID(), title, body, actorOf(sessionOf(res))],
+      `INSERT INTO announcements (id, title, body, category, pinned, posted_by)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [randomUUID(), n.title, n.body, n.category, n.pinned, actorOf(sessionOf(res))],
     );
-    await logActivity(client, res, `Posted a notice: ${title}`);
+    await logActivity(client, res, `Posted a${n.pinned ? " pinned" : ""} ${n.category} notice: ${n.title}`);
     return rows[0];
   });
   res.status(201).json(toAnnouncement(row));
+});
+
+app.put("/announcements/:id", adminOnly, async (req, res) => {
+  const n = readNotice(req.body);
+  const row = await transaction(async (client) => {
+    const { rows } = await client.query<AnnouncementRow>(
+      `UPDATE announcements SET title = $2, body = $3, category = $4, pinned = $5,
+         updated_at = clock_timestamp()
+       WHERE id = $1 RETURNING *`,
+      [req.params.id, n.title, n.body, n.category, n.pinned],
+    );
+    if (!rows[0]) throw new HttpError(404, "Notice not found");
+    await logActivity(client, res, `Edited the notice: ${n.title}`);
+    return rows[0];
+  });
+  res.json(toAnnouncement(row));
 });
 
 app.delete("/announcements/:id", adminOnly, async (req, res) => {

@@ -212,11 +212,18 @@ export interface Admin {
   createdAt: string;
 }
 
+export type AnnouncementCategory = "general" | "important" | "event" | "celebration";
+
 /** A notice from HR, shown to everyone in the staff portal. */
 export interface Announcement {
   id: string;
   title: string;
   body: string;
+  category: AnnouncementCategory;
+  /** Pinned notices stay at the top. */
+  pinned: boolean;
+  /** Set once HR has edited it. */
+  updatedAt?: string;
   /** Who posted it, e.g. "Bola (admin)". */
   postedBy: string;
   createdAt: string;
