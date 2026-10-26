@@ -29,7 +29,7 @@ import {
   money,
   useLoad,
 } from "../lib/api";
-import { logOut } from "../lib/auth";
+import { logOut, saveSession, type Session } from "../lib/auth";
 import { formatDay, formatDays, formatPeriod, LEAVE_LABELS } from "../lib/format";
 import { LoadError, Loading } from "../lib/status";
 
@@ -329,7 +329,10 @@ function PasswordForm({ onSaved, onCancel }: { onSaved: () => void; onCancel: ()
     setSaving(true);
     setError(null);
     try {
-      await apiSend("/me/password", "PUT", form, "Could not change password");
+      // Logins on other devices end; this one gets a fresh token.
+      saveSession(
+        await apiSend<Session>("/me/password", "PUT", form, "Could not change password"),
+      );
       onSaved();
     } catch (e) {
       setError(describeError(e, "Could not change password"));

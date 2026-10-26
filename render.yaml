@@ -79,6 +79,12 @@ services:
       - type: rewrite
         source: /me
         destination: /me.html
+      - type: rewrite
+        source: /activity
+        destination: /activity.html
+      - type: rewrite
+        source: /settings
+        destination: /settings.html
     envVars:
       - key: NODE_VERSION
         value: "24"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { INPUT, PRIMARY_BUTTON } from "../components/form-styles";
 import { API_URL, describeError } from "../lib/api";
 import { homeOf, saveSession, type Session } from "../lib/auth";
@@ -14,6 +14,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const waking = useWakeServer();
 
   const submit = async () => {
     setSaving(true);
@@ -22,8 +23,13 @@ export default function LoginPage() {
       const res = await fetch(`${API_URL}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // An admin without an email is the owner, with ADMIN_PASSWORD.
         body: JSON.stringify(
-          mode === "admin" ? { password } : { email, password },
+          mode === "admin"
+            ? email.trim()
+              ? { role: "admin", email, password }
+              : { password }
+            : { email, password },
         ),
       });
       const body = await res.json();
@@ -77,6 +83,7 @@ export default function LoginPage() {
                 aria-selected={mode === m}
                 onClick={() => {
                   setMode(m);
+                  setEmail("");
                   setPassword("");
                   setError(null);
                 }}
@@ -91,25 +98,25 @@ export default function LoginPage() {
             ))}
           </div>
 
-          {isEmployee && (
-            <label className="mt-6 block text-sm font-medium">
-              Work email
-              <input
-                autoFocus
-                required
-                type="email"
-                autoComplete="username"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className={`${INPUT} h-12`}
-              />
-            </label>
-          )}
-          <label className={`${isEmployee ? "mt-4" : "mt-6"} block text-sm font-medium`}>
+          <label className="mt-6 block text-sm font-medium">
+            {isEmployee ? "Work email" : "Email"}{" "}
+            {!isEmployee && (
+              <span className="font-normal text-muted">(leave empty for the owner password)</span>
+            )}
+            <input
+              autoFocus
+              required={isEmployee}
+              type="email"
+              autoComplete="username"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className={`${INPUT} h-12`}
+            />
+          </label>
+          <label className="mt-4 block text-sm font-medium">
             Password
             <input
               key={mode}
-              autoFocus={!isEmployee}
               required
               type="password"
               autoComplete="current-password"
@@ -118,6 +125,12 @@ export default function LoginPage() {
               className={`${INPUT} h-12`}
             />
           </label>
+          {waking && !error && (
+            <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              Waking up the server. The first visit after a quiet spell can take up to a
+              minute.
+            </p>
+          )}
           {error && (
             <p
               role="alert"
@@ -137,11 +150,33 @@ export default function LoginPage() {
         <p className="mt-6 w-full max-w-sm text-xs text-muted">
           {isEmployee
             ? "Forgotten your password? Ask HR to set a new one."
-            : "Employees log in on the Employee tab."}
+            : "Forgotten your password? Ask another admin, or the owner, to set a new one."}
         </p>
       </div>
     </div>
   );
+}
+
+/**
+ * Pings the API as soon as the page opens: on a free host it sleeps when no one
+ * uses it, so this starts waking it while the person types. True while it's
+ * taking a while to answer.
+ */
+function useWakeServer() {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    let done = false;
+    const timer = setTimeout(() => !done && setSlow(true), 2000);
+    fetch(`${API_URL}/health`)
+      .catch(() => {})
+      .finally(() => {
+        done = true;
+        clearTimeout(timer);
+        setSlow(false);
+      });
+    return () => clearTimeout(timer);
+  }, []);
+  return slow;
 }
 
 // Little cards that drift on the brand panel, hinting at what the app does.

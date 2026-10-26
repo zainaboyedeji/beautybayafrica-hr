@@ -17,9 +17,9 @@ import Modal from "../../components/modal";
 import { Notice } from "../../components/notice";
 import PayslipView from "../../components/payslip-view";
 import {
-  apiFetch,
   apiSend,
   describeError,
+  downloadFile,
   fetchPayrollRun,
   fetchPayrollRuns,
   money,
@@ -28,7 +28,7 @@ import {
 import { formatDay, formatPeriod, today } from "../../lib/format";
 import { LoadError, Loading } from "../../lib/status";
 
-type Confirm = "paid" | "delete";
+type Confirm = "paid" | "delete" | "reopen";
 
 export default function PayrollPage() {
   const runs = useLoad(fetchPayrollRuns);
@@ -204,17 +204,21 @@ function RunDetail({
     }
   };
 
-  const downloadCsv = () =>
-    act(async () => {
-      const res = await apiFetch(`/payroll/${period}/bank.csv`);
-      if (!res.ok) throw new Error("Could not download the bank file");
-      const url = URL.createObjectURL(await res.blob());
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `payroll-${period}.csv`;
-      link.click();
-      URL.revokeObjectURL(url);
-    }, `Bank file for ${formatPeriod(period)} downloaded.`);
+  // The bank's bulk payment file, and the PAYE and pension remittance schedules.
+  const downloadCsv = (file: "bank" | "paye" | "pension", label: string) =>
+    act(
+      () =>
+        downloadFile(
+          `/payroll/${period}/${file}.csv`,
+          `${file === "bank" ? "payroll" : file}-${period}.csv`,
+          `Could not download the ${label}`,
+        ),
+      `${label[0].toUpperCase()}${label.slice(1)} for ${formatPeriod(period)} downloaded.`,
+    );
+  const hasPaye = run.payslips.some((p) => p.deductions.some((d) => d.name.startsWith("PAYE")));
+  const hasPension = run.payslips.some(
+    (p) => p.employerPension > 0 || p.deductions.some((d) => d.name.startsWith("Pension")),
+  );
 
   const unpaid = run.payslips.filter((p) => !p.paidAt);
   const missingBank = unpaid.filter((p) => !p.bankAccountNumber);
@@ -281,6 +285,24 @@ function RunDetail({
           onClose={() => setUndoing(null)}
         />
       )}
+      {confirm === "reopen" && (
+        <ConfirmDialog
+          title={`Reopen ${formatPeriod(period)}`}
+          message="Only to correct a mistake. Everyone stays paid: undo the payment of each person whose payslip is wrong, fix it, and pay them again (if money was already sent, only send the difference). The month locks again once everyone is paid. Say what is being corrected; it goes in the activity log."
+          confirmLabel="Reopen"
+          withNote
+          noteRequired
+          danger
+          onConfirm={async (reason) => {
+            setConfirm(null);
+            await act(
+              () => apiSend(`/payroll/${period}/reopen`, "POST", { reason }, "Could not reopen"),
+              `${formatPeriod(period)} is open for corrections.`,
+            );
+          }}
+          onClose={() => setConfirm(null)}
+        />
+      )}
       {confirm === "delete" && (
         <ConfirmDialog
           title="Delete draft"
@@ -334,10 +356,28 @@ function RunDetail({
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button disabled={busy} onClick={() => void downloadCsv()} className={SECONDARY_BUTTON}>
+          <button disabled={busy} onClick={() => void downloadCsv("bank", "bank file")} className={SECONDARY_BUTTON}>
             <Icon name="download" className="h-4 w-4" />
             Bank file (CSV)
           </button>
+          {hasPaye && (
+            <button disabled={busy} onClick={() => void downloadCsv("paye", "PAYE schedule")} className={SECONDARY_BUTTON}>
+              <Icon name="download" className="h-4 w-4" />
+              PAYE schedule
+            </button>
+          )}
+          {hasPension && (
+            <button disabled={busy} onClick={() => void downloadCsv("pension", "pension schedule")} className={SECONDARY_BUTTON}>
+              <Icon name="download" className="h-4 w-4" />
+              Pension schedule
+            </button>
+          )}
+          {!draft && (
+            <button disabled={busy} onClick={() => setConfirm("reopen")} className={SECONDARY_BUTTON}>
+              <Icon name="refresh" className="h-4 w-4" />
+              Reopen month
+            </button>
+          )}
           {draft && (
             <>
               <button

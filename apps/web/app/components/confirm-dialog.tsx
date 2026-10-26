@@ -10,6 +10,8 @@ type Props = {
   confirmLabel: string;
   /** Shows a box for an optional note, passed to `onConfirm`. */
   withNote?: boolean;
+  /** Makes the note a required reason. */
+  noteRequired?: boolean;
   danger?: boolean;
   onConfirm: (note: string) => Promise<void>;
   onClose: () => void;
@@ -24,6 +26,7 @@ export default function ConfirmDialog({
   message,
   confirmLabel,
   withNote,
+  noteRequired,
   danger,
   onConfirm,
   onClose,
@@ -43,9 +46,14 @@ export default function ConfirmDialog({
         <p className="text-sm">{message}</p>
         {withNote && (
           <label className="mt-4 block text-sm font-medium">
-            Note <span className="font-normal text-muted">(optional)</span>
+            {noteRequired ? "Reason" : (
+              <>
+                Note <span className="font-normal text-muted">(optional)</span>
+              </>
+            )}
             <textarea
               autoFocus
+              required={noteRequired}
               rows={3}
               value={note}
               onChange={(e) => setNote(e.target.value)}

@@ -3,10 +3,28 @@ import { today } from "./payroll";
 import type express from "express";
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
-// The admin logs in with ADMIN_PASSWORD; employees log in to the staff portal
-// with their work email and a password the admin gives them.
+// Admins log in with their email and password, and the owner with
+// ADMIN_PASSWORD alone; employees log in to the staff portal with their work
+// email and a password the admin gives them.
 export type Role = "admin" | "employee";
-export type Session = { role: Role; name: string; employeeId?: string; exp: number };
+export type Session = {
+  role: Role;
+  name: string;
+  employeeId?: string;
+  /** Absent for the owner, who logs in with ADMIN_PASSWORD. */
+  adminId?: string;
+  /** When the login was made, so a password reset can end older ones. */
+  iat: number;
+  exp: number;
+};
+
+/** Who did something, for the activity log. */
+export const actorOf = (session: Session) =>
+  session.role === "employee"
+    ? `${session.name} (staff portal)`
+    : session.adminId
+      ? `${session.name} (admin)`
+      : "Owner";
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "";
 if (!ADMIN_PASSWORD) {
@@ -41,9 +59,10 @@ export const isAdminPassword = (password: string) =>
 const sign = (payload: string) =>
   createHmac("sha256", SESSION_SECRET).update(payload).digest("base64url");
 
-export const createToken = (session: Omit<Session, "exp">) => {
+export const createToken = (session: Omit<Session, "iat" | "exp">) => {
+  const now = Date.now();
   const payload = Buffer.from(
-    JSON.stringify({ ...session, exp: Date.now() + SESSION_HOURS * 3600_000 }),
+    JSON.stringify({ ...session, iat: now, exp: now + SESSION_HOURS * 3600_000 }),
   ).toString("base64url");
   return `${payload}.${sign(payload)}`;
 };
@@ -59,14 +78,25 @@ const readToken = async (header: string | undefined): Promise<Session | null> =>
     Buffer.from(payload, "base64url").toString("utf8"),
   );
   if (session.exp < Date.now()) return null;
+  // Logins from before the last password reset no longer count. (Logins made
+  // before this check existed have no `iat`.)
+  const issued = new Date(session.iat ?? 0);
   // Someone who has been deactivated, has left (after their last day, in
   // company time), or whose portal access was removed, is logged out straight
-  // away: this is checked on every request.
+  // away: this is checked on every request. The same goes for admins.
   if (session.role === "employee") {
     const { rowCount } = await db.query(
       `SELECT 1 FROM employees WHERE id = $1 AND password_hash IS NOT NULL
-         AND deactivated_at IS NULL AND (end_date IS NULL OR end_date >= $2)`,
-      [session.employeeId, today()],
+         AND deactivated_at IS NULL AND (end_date IS NULL OR end_date >= $2)
+         AND sessions_valid_after <= $3`,
+      [session.employeeId, today(), issued],
+    );
+    if (!rowCount) return null;
+  } else if (session.adminId) {
+    const { rowCount } = await db.query(
+      `SELECT 1 FROM admins WHERE id = $1 AND deactivated_at IS NULL
+         AND sessions_valid_after <= $2`,
+      [session.adminId, issued],
     );
     if (!rowCount) return null;
   }

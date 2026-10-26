@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type {
+  Activity,
+  Admin,
   Dashboard,
   Guarantor,
   Department,
@@ -12,6 +14,7 @@ import type {
   PayrollRun,
   PayrollRunDetail,
   Payslip,
+  PublicHoliday,
 } from "@hr/types";
 import { getSession, logOut } from "./auth";
 
@@ -74,6 +77,21 @@ export const fetchPayrollRuns = getJson<PayrollRun[]>("/payroll");
 export const fetchMe = getJson<MyProfile>("/me");
 export const fetchMyLeave = getJson<LeaveRequest[]>("/leave/mine");
 export const fetchMyPayslips = getJson<Payslip[]>("/payslips/mine");
+export const fetchAdmins = getJson<Admin[]>("/admins");
+export const fetchActivity = getJson<Activity[]>("/activity");
+export const fetchHolidays = getJson<PublicHoliday[]>("/holidays");
+
+/** Saves a file from the API (a CSV, a backup) to the user's computer. */
+export async function downloadFile(path: string, fileName: string, fallback: string) {
+  const res = await apiFetch(path);
+  if (!res.ok) throw new Error(fallback);
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
 
 export const fetchPayItems = (employeeId: string) =>
   getJson<PayItem[]>(`/employees/${employeeId}/pay-items`)();

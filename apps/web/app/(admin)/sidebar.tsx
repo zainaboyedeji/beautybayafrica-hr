@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 import Icon, { type IconName } from "../components/icons";
 import { fetchLeave, useLoad } from "../lib/api";
-import { logOut } from "../lib/auth";
+import { logOut, useSession } from "../lib/auth";
 
 // Each section has its own icon tint, so the menu reads at a glance.
 const LINKS: { href: string; label: string; icon: IconName; tint: string }[] = [
@@ -14,10 +14,13 @@ const LINKS: { href: string; label: string; icon: IconName; tint: string }[] = [
   { href: "/departments", label: "Departments", icon: "building", tint: "bg-sky-100 text-sky-800" },
   { href: "/leave", label: "Leave", icon: "calendar", tint: "bg-amber-100 text-amber-800" },
   { href: "/payroll", label: "Payroll", icon: "wallet", tint: "bg-emerald-100 text-emerald-800" },
+  { href: "/activity", label: "Activity", icon: "clock", tint: "bg-rose-100 text-rose-700" },
+  { href: "/settings", label: "Settings", icon: "key", tint: "bg-slate-100 text-slate-700" },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname().replace(/\/$/, "") || "/";
+  const session = useSession(["admin"]);
   const leave = useLoad(fetchLeave);
   const { reload } = leave;
   // Check for new leave requests whenever the admin moves to another page.
@@ -78,7 +81,7 @@ export default function Sidebar() {
         <p className="text-xs font-semibold uppercase tracking-[0.15em] text-brand-deep">
           Logged in as
         </p>
-        <p className="mt-0.5 font-semibold">Admin</p>
+        <p className="mt-0.5 font-semibold">{session?.name ?? "Admin"}</p>
         <button
           onClick={logOut}
           className="mt-3 inline-flex items-center gap-2 rounded-full bg-white px-3.5 py-1.5 text-xs font-semibold text-ink shadow-sm transition hover:text-brand-deep"

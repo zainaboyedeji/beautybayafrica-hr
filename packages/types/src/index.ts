@@ -45,6 +45,14 @@ export interface Employee {
   /** How PAYE is taken; `payeAmount` is the monthly amount when "fixed". */
   paye: PayeMode;
   payeAmount: number;
+  /** The company's own pension contribution, on top of pay; 0 for none. */
+  employerPensionPercent: number;
+  /** True when NHF (2.5% of basic salary) is taken. */
+  nhf: boolean;
+  /** For the PAYE and pension schedules. */
+  taxId?: string;
+  pensionProvider?: string;
+  pensionPin?: string;
   /** Working days of annual leave per calendar year. */
   annualLeaveDays: number;
   /** Annual leave approved for this calendar year, in working days. */
@@ -124,6 +132,11 @@ export interface Payslip {
   gross: number;
   totalDeductions: number;
   net: number;
+  /** The company's pension contribution, paid on top of `net`. */
+  employerPension: number;
+  taxId?: string;
+  pensionProvider?: string;
+  pensionPin?: string;
   /** When HR confirmed the salary transfer; employees see it from then. */
   paidAt?: string;
   /** The transfer reference: the bank's, or one the app made up. */
@@ -180,6 +193,29 @@ export interface Guarantor {
   /** When HR checked them; cleared if the employee changes the details. */
   verifiedAt?: string;
   updatedAt: string;
+}
+
+/** Someone who can log in to the HR office. */
+export interface Admin {
+  id: string;
+  name: string;
+  email: string;
+  deactivatedAt?: string;
+  createdAt: string;
+}
+
+/** One change made in the app, in words. */
+export interface Activity {
+  id: string;
+  at: string;
+  /** Who did it, e.g. "Amaka (admin)" or "Tunde (staff portal)". */
+  actor: string;
+  summary: string;
+}
+
+export interface PublicHoliday {
+  day: Day;
+  name: string;
 }
 
 /** The reference to put on a salary transfer, e.g. SAL-202610-BBA-001. */

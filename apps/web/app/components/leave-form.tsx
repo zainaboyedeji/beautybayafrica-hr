@@ -1,14 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { Employee, LeaveRequest, LeaveType } from "@hr/types";
-import { apiSend, describeError } from "../lib/api";
+import { apiSend, describeError, fetchHolidays, useLoad } from "../lib/api";
 import { formatDays, LEAVE_LABELS, today } from "../lib/format";
 import { INPUT, PRIMARY_BUTTON, SECONDARY_BUTTON } from "./form-styles";
 
-// Monday-to-Friday days between two dates, both included (the API has the
-// final say; this is only a preview).
-const weekdays = (start: string, end: string) => {
+// Monday-to-Friday days between two dates, both included, less public
+// holidays (the API has the final say; this is only a preview).
+const weekdays = (start: string, end: string, holidays: ReadonlySet<string>) => {
   if (!start || !end || end < start) return 0;
   let count = 0;
   for (
@@ -17,7 +17,7 @@ const weekdays = (start: string, end: string) => {
     d.setUTCDate(d.getUTCDate() + 1)
   ) {
     const day = d.getUTCDay();
-    if (day !== 0 && day !== 6) count++;
+    if (day !== 0 && day !== 6 && !holidays.has(d.toISOString().slice(0, 10))) count++;
   }
   return count;
 };
@@ -44,7 +44,12 @@ export default function LeaveForm({
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const days = weekdays(form.startDate, form.endDate);
+  const holidayList = useLoad(fetchHolidays);
+  const holidays = useMemo(
+    () => new Set(holidayList.data?.map((h) => h.day)),
+    [holidayList.data],
+  );
+  const days = weekdays(form.startDate, form.endDate, holidays);
 
   const submit = async () => {
     setSaving(true);

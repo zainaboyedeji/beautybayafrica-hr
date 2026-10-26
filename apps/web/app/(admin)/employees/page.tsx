@@ -375,8 +375,13 @@ function EmployeeForm({
     pensionPercent: String(employee?.pensionPercent ?? 0),
     paye: employee?.paye ?? ("none" as PayeMode),
     payeAmount: employee?.payeAmount ? String(employee.payeAmount) : "",
+    employerPensionPercent: String(employee?.employerPensionPercent ?? 0),
+    taxId: employee?.taxId ?? "",
+    pensionProvider: employee?.pensionProvider ?? "",
+    pensionPin: employee?.pensionPin ?? "",
     password: "",
   });
+  const [nhf, setNhf] = useState(employee?.nhf ?? false);
   // A new employee starts with no allowances; an existing one's are loaded.
   const [items, setItems] = useState<DraftItem[] | null>(employee ? null : []);
   const [itemsFailed, setItemsFailed] = useState(false);
@@ -413,6 +418,8 @@ function EmployeeForm({
           annualLeaveDays: Number(form.annualLeaveDays),
           pensionPercent: Number(form.pensionPercent || 0),
           payeAmount: Number(form.payeAmount || 0),
+          employerPensionPercent: Number(form.employerPensionPercent || 0),
+          nhf,
           // Left out while still loading, so the saved lines stay as they are.
           ...(items ? { items: items.map((i) => ({ ...i, amount: Number(i.amount) })) } : {}),
         },
@@ -532,7 +539,41 @@ function EmployeeForm({
           </label>
         )}
       </div>
-      <PaySummary form={form} items={items ?? []} />
+      <div className="grid gap-3 sm:grid-cols-3">
+        <label className="text-sm font-medium">
+          Employer pension <span className="font-normal text-muted">(% paid on top)</span>
+          <input type="number" min={0} max={100} step={0.01} placeholder="0 = none" {...field("employerPensionPercent")} />
+        </label>
+        <label className="flex items-center gap-2 self-end pb-3 text-sm font-medium sm:col-span-2">
+          <input
+            type="checkbox"
+            checked={nhf}
+            onChange={(e) => setNhf(e.target.checked)}
+            className="h-4 w-4 accent-brand-deep"
+          />
+          Take NHF <span className="font-normal text-muted">(2.5% of basic salary)</span>
+        </label>
+      </div>
+      <PaySummary form={form} nhf={nhf} items={items ?? []} />
+
+      <p className="mt-2 text-sm font-semibold">
+        Tax and pension details{" "}
+        <span className="font-normal text-muted">(for the PAYE and pension schedules)</span>
+      </p>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <label className="text-sm font-medium">
+          Tax ID (TIN)
+          <input {...field("taxId")} />
+        </label>
+        <label className="text-sm font-medium">
+          Pension provider (PFA)
+          <input placeholder="e.g. Stanbic IBTC Pension" {...field("pensionProvider")} />
+        </label>
+        <label className="text-sm font-medium">
+          RSA PIN
+          <input placeholder="e.g. PEN100…" {...field("pensionPin")} />
+        </label>
+      </div>
       <p className="mt-2 text-sm font-semibold">
         Bank account <span className="font-normal text-muted">(where salary is paid)</span>
       </p>
@@ -673,17 +714,27 @@ function PayLines({
 /** What a full month's pay comes to with the lines entered so far. */
 function PaySummary({
   form,
+  nhf: takesNhf,
   items,
 }: {
-  form: { baseSalary: string; pensionPercent: string; paye: string; payeAmount: string };
+  form: {
+    baseSalary: string;
+    pensionPercent: string;
+    paye: string;
+    payeAmount: string;
+    employerPensionPercent: string;
+  };
+  nhf: boolean;
   items: DraftItem[];
 }) {
   const total = (kind: PayItemKind) =>
     items.filter((i) => i.kind === kind).reduce((s, i) => s + (Number(i.amount) || 0), 0);
   const gross = (Number(form.baseSalary) || 0) + total("allowance");
   const pension = (gross * (Number(form.pensionPercent) || 0)) / 100;
+  const nhf = takesNhf ? (Number(form.baseSalary) || 0) * 0.025 : 0;
   const paye = form.paye === "fixed" ? Number(form.payeAmount) || 0 : 0;
-  const net = gross - pension - paye - total("deduction");
+  const net = gross - pension - nhf - paye - total("deduction");
+  const employerPension = (gross * (Number(form.employerPensionPercent) || 0)) / 100;
 
   return (
     <dl className="grid gap-1 rounded-lg bg-surface-alt px-4 py-3 text-sm">
@@ -691,6 +742,7 @@ function PaySummary({
       {pension > 0 && (
         <SummaryLine label={`Pension (${Number(form.pensionPercent)}%)`} value={`− ${money.format(pension)}`} />
       )}
+      {nhf > 0 && <SummaryLine label="NHF (2.5%)" value={`− ${money.format(nhf)}`} />}
       {form.paye === "fixed" && <SummaryLine label="PAYE" value={`− ${money.format(paye)}`} />}
       {form.paye === "auto" && (
         <SummaryLine label="PAYE" value="worked out when payroll runs" />
@@ -703,6 +755,11 @@ function PaySummary({
         value={money.format(net)}
         strong
       />
+      {employerPension > 0 && (
+        <p className="text-xs text-muted">
+          Plus {money.format(employerPension)} employer pension, paid by the company to their PFA.
+        </p>
+      )}
     </dl>
   );
 }

@@ -1,5 +1,6 @@
 import { db, transaction } from "./db";
 import {
+  actorOf,
   adminOnly,
   anyone,
   clearFailedLogins,
@@ -30,6 +31,8 @@ import express from "express";
 import type { PoolClient } from "pg";
 import { randomUUID } from "node:crypto";
 import type {
+  Activity,
+  Admin,
   Dashboard,
   Guarantor,
   Day,
@@ -48,6 +51,7 @@ import type {
   PayrollRunDetail,
   PayrollStatus,
   Payslip,
+  PublicHoliday,
 } from "@hr/types";
 
 const app = express();
@@ -67,6 +71,48 @@ class HttpError extends Error {
     super(message);
   }
 }
+
+const naira = new Intl.NumberFormat("en-NG", { style: "currency", currency: "NGN" });
+const money = (amount: number) => naira.format(amount);
+/** "October 2026", for a period. */
+const monthName = (period: string) =>
+  new Date(`${period}-01T00:00:00Z`).toLocaleDateString("en-GB", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+/** "2 Nov 2026", for a day. */
+const dayName = (day: Day) =>
+  new Date(`${day}T00:00:00Z`).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+
+/**
+ * Records a change in the activity log as the logged-in user. Inside a
+ * transaction, pass its client, so the entry is kept only if the change is.
+ */
+const logActivity = (
+  client: PoolClient | typeof db,
+  res: express.Response,
+  summary: string,
+) =>
+  client.query("INSERT INTO activity_log (actor, summary) VALUES ($1, $2)", [
+    actorOf(sessionOf(res)),
+    summary,
+  ]);
+
+/** Lines as a CSV file, with text quoted and spreadsheet formulas stopped. */
+const toCsv = (lines: (string | number | undefined | null)[][]) => {
+  const cell = (value: string | number | undefined | null) => {
+    const text = String(value ?? "");
+    const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+    return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+  };
+  return lines.map((line) => line.map(cell).join(",")).join("\n");
+};
 
 /** Trimmed text, or null when empty. */
 const optionalText = (value: unknown) => {
@@ -99,12 +145,18 @@ type EmployeeRow = {
   pension_percent: number;
   paye: PayeMode;
   paye_amount: number;
+  employer_pension_percent: number;
+  nhf: boolean;
+  tax_id: string | null;
+  pension_provider: string | null;
+  pension_pin: string | null;
   bank_name: string | null;
   bank_account_number: string | null;
   bank_account_name: string | null;
   annual_leave_days: number;
   salt: string | null;
   password_hash: string | null;
+  sessions_valid_after: Date;
   deactivated_at: Date | null;
   annual_leave_taken: number;
   monthly_allowances?: number;
@@ -134,6 +186,11 @@ const toEmployee = (row: EmployeeRow): Employee => ({
   pensionPercent: row.pension_percent,
   paye: row.paye,
   payeAmount: row.paye_amount,
+  employerPensionPercent: row.employer_pension_percent,
+  nhf: row.nhf,
+  ...(row.tax_id !== null ? { taxId: row.tax_id } : {}),
+  ...(row.pension_provider !== null ? { pensionProvider: row.pension_provider } : {}),
+  ...(row.pension_pin !== null ? { pensionPin: row.pension_pin } : {}),
   annualLeaveDays: row.annual_leave_days,
   annualLeaveTaken: row.annual_leave_taken,
   canLogIn: row.password_hash !== null,
@@ -229,6 +286,10 @@ type PayslipRow = {
   gross: number;
   total_deductions: number;
   net: number;
+  employer_pension: number;
+  tax_id: string | null;
+  pension_provider: string | null;
+  pension_pin: string | null;
   paid_at: Date | null;
   payment_reference: string | null;
 };
@@ -255,6 +316,10 @@ const toPayslip = (row: PayslipRow): Payslip => ({
   gross: row.gross,
   totalDeductions: row.total_deductions,
   net: row.net,
+  employerPension: row.employer_pension,
+  ...(row.tax_id !== null ? { taxId: row.tax_id } : {}),
+  ...(row.pension_provider !== null ? { pensionProvider: row.pension_provider } : {}),
+  ...(row.pension_pin !== null ? { pensionPin: row.pension_pin } : {}),
   ...(row.paid_at !== null ? { paidAt: row.paid_at.toISOString() } : {}),
   ...(row.payment_reference !== null ? { paymentReference: row.payment_reference } : {}),
 });
@@ -323,9 +388,17 @@ app.post("/auth/login", async (req, res) => {
 
   const password = String(req.body?.password ?? "");
   const email = String(req.body?.email ?? "").trim().toLowerCase();
-  let session: Omit<Session, "exp"> | null = null;
+  let session: Omit<Session, "iat" | "exp"> | null = null;
   if (!email && password && isAdminPassword(password)) {
-    session = { role: "admin", name: "Admin" };
+    session = { role: "admin", name: "Owner" };
+  } else if (email && password && req.body?.role === "admin") {
+    const { rows } = await db.query<AdminRow>(
+      "SELECT * FROM admins WHERE email = $1 AND deactivated_at IS NULL",
+      [email],
+    );
+    const admin = rows[0];
+    if (admin && passwordMatchesHash(password, admin.salt, admin.password_hash))
+      session = { role: "admin", name: admin.name, adminId: admin.id };
   } else if (email && password) {
     const { rows } = await db.query<EmployeeRow>(
       `SELECT * FROM employees WHERE email = $1 AND password_hash IS NOT NULL
@@ -423,7 +496,10 @@ app.post("/departments", adminOnly, async (req, res) => {
     return;
   }
   const id = randomUUID();
-  await db.query("INSERT INTO departments (id, name) VALUES ($1, $2)", [id, name]);
+  await transaction(async (client) => {
+    await client.query("INSERT INTO departments (id, name) VALUES ($1, $2)", [id, name]);
+    await logActivity(client, res, `Added the ${name} department`);
+  });
   const department: Department = { id, name, headcount: 0 };
   res.status(201).json(department);
 });
@@ -434,26 +510,32 @@ app.put("/departments/:id", adminOnly, async (req, res) => {
     res.status(400).json({ error: "Enter the department's name" });
     return;
   }
-  const { rowCount } = await db.query(
-    "UPDATE departments SET name = $2 WHERE id = $1",
-    [req.params.id, name],
-  );
-  if (!rowCount) {
-    res.status(404).json({ error: "Department not found" });
-    return;
-  }
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ name: string }>(
+      "SELECT name FROM departments WHERE id = $1 FOR UPDATE",
+      [req.params.id],
+    );
+    if (!rows[0]) throw new HttpError(404, "Department not found");
+    await client.query("UPDATE departments SET name = $2 WHERE id = $1", [
+      req.params.id,
+      name,
+    ]);
+    if (rows[0].name !== name)
+      await logActivity(client, res, `Renamed the ${rows[0].name} department to ${name}`);
+  });
   res.json({ id: req.params.id, name });
 });
 
 // Its employees stay, without a department.
 app.delete("/departments/:id", adminOnly, async (req, res) => {
-  const { rowCount } = await db.query("DELETE FROM departments WHERE id = $1", [
-    req.params.id,
-  ]);
-  if (!rowCount) {
-    res.status(404).json({ error: "Department not found" });
-    return;
-  }
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ name: string }>(
+      "DELETE FROM departments WHERE id = $1 RETURNING name",
+      [req.params.id],
+    );
+    if (!rows[0]) throw new HttpError(404, "Department not found");
+    await logActivity(client, res, `Deleted the ${rows[0].name} department`);
+  });
   res.sendStatus(204);
 });
 
@@ -497,6 +579,9 @@ const readEmployeeForm = (body: Record<string, unknown> | undefined) => {
   const payeAmount = paye === "fixed" ? optionalAmount(body?.payeAmount, "PAYE") : 0;
   if (paye === "fixed" && payeAmount === 0)
     throw new HttpError(400, "Enter the monthly PAYE amount");
+  const employerPensionPercent = Number(body?.employerPensionPercent ?? 0);
+  if (!(employerPensionPercent >= 0 && employerPensionPercent <= 100))
+    throw new HttpError(400, "Employer pension must be a % from 0 to 100");
   return [
     employeeNo,
     name,
@@ -515,8 +600,62 @@ const readEmployeeForm = (body: Record<string, unknown> | undefined) => {
     round2(pensionPercent),
     paye,
     payeAmount,
+    optionalText(body?.taxId),
+    optionalText(body?.pensionProvider),
+    optionalText(body?.pensionPin),
+    round2(employerPensionPercent),
+    body?.nhf === true,
   ];
 };
+
+// The columns readEmployeeForm's values go into, in order, and how a change
+// to each reads in the activity log.
+const EMPLOYEE_FIELDS: [column: keyof EmployeeRow, label: string, show?: (v: never) => string][] = [
+  ["employee_no", "staff number"],
+  ["name", "name"],
+  ["email", "email"],
+  ["phone", "phone"],
+  ["job_title", "job title"],
+  ["department_id", "department", () => "changed"],
+  ["employment_type", "employment type"],
+  ["start_date", "start date"],
+  ["end_date", "leaving date"],
+  ["base_salary", "basic salary", money],
+  ["bank_name", "bank"],
+  ["bank_account_number", "account number"],
+  ["bank_account_name", "account name"],
+  ["annual_leave_days", "annual leave days"],
+  ["pension_percent", "pension %"],
+  ["paye", "PAYE"],
+  ["paye_amount", "fixed PAYE", money],
+  ["tax_id", "tax ID"],
+  ["pension_provider", "pension provider"],
+  ["pension_pin", "RSA PIN"],
+  ["employer_pension_percent", "employer pension %"],
+  ["nhf", "NHF", (on: boolean) => (on ? "on" : "off")],
+];
+const EMPLOYEE_COLUMNS = EMPLOYEE_FIELDS.map(([column]) => column);
+
+/** What an edit changed, e.g. "basic salary ₦150,000.00 → ₦180,000.00". */
+const describeChanges = (before: EmployeeRow, values: unknown[]) =>
+  EMPLOYEE_FIELDS.flatMap(([column, label, show], i) => {
+    const was = before[column] ?? null;
+    const now = values[i] ?? null;
+    if (String(was) === String(now)) return [];
+    const text = (v: unknown) =>
+      v === null ? "none" : show ? show(v as never) : String(v);
+    return show && column === "department_id"
+      ? [`${label} changed`]
+      : [`${label} ${text(was)} → ${text(now)}`];
+  });
+
+/** "Transport ₦20,000.00, Staff loan ₦5,000.00 (deduction)", for the log. */
+const describeItems = (items: { kind: string; name: string; amount: number }[]) =>
+  items.length === 0
+    ? "none"
+    : items
+        .map((i) => `${i.name} ${money(i.amount)}${i.kind === "deduction" ? " (deduction)" : ""}`)
+        .join(", ");
 
 const PAYE_MODES: PayeMode[] = ["none", "fixed", "auto"];
 
@@ -542,16 +681,19 @@ app.post("/employees", adminOnly, async (req, res) => {
   const items = Array.isArray(req.body?.items) ? readPayItems(req.body.items) : [];
   const id = randomUUID();
   await transaction(async (client) => {
+    const columns = [...EMPLOYEE_COLUMNS, "id", "salt", "password_hash"];
     await client.query(
-      `INSERT INTO employees (employee_no, name, email, phone, job_title,
-         department_id, employment_type, start_date, end_date, base_salary,
-         bank_name, bank_account_number, bank_account_name, annual_leave_days,
-         pension_percent, paye, paye_amount, id, salt, password_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-         $15, $16, $17, $18, $19, $20)`,
+      `INSERT INTO employees (${columns.join(", ")})
+       VALUES (${columns.map((_, i) => `$${i + 1}`).join(", ")})`,
       [...values, id, login?.salt ?? null, login?.hash ?? null],
     );
     await savePayItems(client, id, items);
+    await logActivity(
+      client,
+      res,
+      `Added employee ${values[1]} (${values[0]}), basic salary ${money(values[9] as number)}` +
+        (items.length ? `, with ${describeItems(items)}` : ""),
+    );
   });
   res.status(201).json(toEmployee(await fetchEmployee(id)));
 });
@@ -560,19 +702,29 @@ app.put("/employees/:id", adminOnly, async (req, res) => {
   const values = readEmployeeForm(req.body);
   // Without `items`, the allowances and deductions stay as they are.
   const items = Array.isArray(req.body?.items) ? readPayItems(req.body.items) : null;
+  const id = String(req.params.id);
   await transaction(async (client) => {
-    const { rowCount } = await client.query(
-      `UPDATE employees SET employee_no = $1, name = $2, email = $3, phone = $4,
-         job_title = $5, department_id = $6, employment_type = $7,
-         start_date = $8, end_date = $9, base_salary = $10, bank_name = $11,
-         bank_account_number = $12, bank_account_name = $13,
-         annual_leave_days = $14, pension_percent = $15, paye = $16,
-         paye_amount = $17
-       WHERE id = $18`,
-      [...values, req.params.id],
+    const { rows } = await client.query<EmployeeRow>(
+      "SELECT * FROM employees WHERE id = $1 FOR UPDATE",
+      [id],
     );
-    if (!rowCount) throw new HttpError(404, "Employee not found");
-    if (items) await savePayItems(client, String(req.params.id), items);
+    const before = rows[0];
+    if (!before) throw new HttpError(404, "Employee not found");
+    const changes = describeChanges(before, values);
+    await client.query(
+      `UPDATE employees SET
+         ${EMPLOYEE_COLUMNS.map((column, i) => `${column} = $${i + 1}`).join(", ")}
+       WHERE id = $${EMPLOYEE_COLUMNS.length + 1}`,
+      [...values, id],
+    );
+    if (items) {
+      const old = (await fetchPayItems(client, [id])).map(toPayItem);
+      if (describeItems(old) !== describeItems(items))
+        changes.push(`pay lines ${describeItems(old)} → ${describeItems(items)}`);
+      await savePayItems(client, id, items);
+    }
+    if (changes.length)
+      await logActivity(client, res, `Updated ${values[1]}: ${changes.join("; ")}`);
   });
   res.json(toEmployee(await fetchEmployee(String(req.params.id))));
 });
@@ -582,42 +734,53 @@ app.put("/employees/:id/password", adminOnly, async (req, res) => {
   const password = String(req.body?.password ?? "");
   checkPassword(password);
   const { salt, hash } = hashPassword(password);
-  const { rowCount } = await db.query(
-    "UPDATE employees SET salt = $2, password_hash = $3 WHERE id = $1",
-    [req.params.id, salt, hash],
-  );
-  if (!rowCount) {
-    res.status(404).json({ error: "Employee not found" });
-    return;
-  }
+  await transaction(async (client) => {
+    // Any login they already had ends: the new password is the only way in.
+    const { rows } = await client.query<{ name: string }>(
+      `UPDATE employees SET salt = $2, password_hash = $3, sessions_valid_after = $4
+       WHERE id = $1 RETURNING name`,
+      [req.params.id, salt, hash, new Date()],
+    );
+    if (!rows[0]) throw new HttpError(404, "Employee not found");
+    await logActivity(client, res, `Set a new staff portal password for ${rows[0].name}`);
+  });
   res.sendStatus(204);
 });
 
 // Stop an employee using the staff portal; they are logged out straight away.
 app.delete("/employees/:id/password", adminOnly, async (req, res) => {
-  const { rowCount } = await db.query(
-    "UPDATE employees SET salt = NULL, password_hash = NULL WHERE id = $1",
-    [req.params.id],
-  );
-  if (!rowCount) {
-    res.status(404).json({ error: "Employee not found" });
-    return;
-  }
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ name: string }>(
+      "UPDATE employees SET salt = NULL, password_hash = NULL WHERE id = $1 RETURNING name",
+      [req.params.id],
+    );
+    if (!rows[0]) throw new HttpError(404, "Employee not found");
+    await logActivity(client, res, `Removed staff portal access for ${rows[0].name}`);
+  });
   res.sendStatus(204);
 });
 
 // Shuts an employee out of the staff portal straight away, or lets them back in.
 app.put("/employees/:id/active", adminOnly, async (req, res) => {
-  const { rowCount } = await db.query(
-    `UPDATE employees SET deactivated_at = CASE WHEN $2 THEN NULL
-       ELSE COALESCE(deactivated_at, now()) END
-     WHERE id = $1`,
-    [req.params.id, req.body?.active === true],
-  );
-  if (!rowCount) {
-    res.status(404).json({ error: "Employee not found" });
-    return;
-  }
+  const active = req.body?.active === true;
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ name: string; was_active: boolean }>(
+      `UPDATE employees e SET deactivated_at = CASE WHEN $2 THEN NULL
+         ELSE COALESCE(e.deactivated_at, now()) END
+       FROM employees old WHERE e.id = $1 AND old.id = e.id
+       RETURNING e.name, old.deactivated_at IS NULL AS was_active`,
+      [req.params.id, active],
+    );
+    if (!rows[0]) throw new HttpError(404, "Employee not found");
+    if (rows[0].was_active !== active)
+      await logActivity(
+        client,
+        res,
+        active
+          ? `Reactivated ${rows[0].name}`
+          : `Deactivated ${rows[0].name}, shutting them out of the staff portal`,
+      );
+  });
   res.json(toEmployee(await fetchEmployee(String(req.params.id))));
 });
 
@@ -634,13 +797,18 @@ app.delete("/employees/:id", adminOnly, async (req, res) => {
     });
     return;
   }
-  const { rowCount } = await db.query("DELETE FROM employees WHERE id = $1", [
-    req.params.id,
-  ]);
-  if (!rowCount) {
-    res.status(404).json({ error: "Employee not found" });
-    return;
-  }
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ name: string; employee_no: string }>(
+      "DELETE FROM employees WHERE id = $1 RETURNING name, employee_no",
+      [req.params.id],
+    );
+    if (!rows[0]) throw new HttpError(404, "Employee not found");
+    await logActivity(
+      client,
+      res,
+      `Deleted employee ${rows[0].name} (${rows[0].employee_no}) and their leave records`,
+    );
+  });
   res.sendStatus(204);
 });
 
@@ -714,7 +882,17 @@ app.put("/employees/:id/pay-items", adminOnly, async (req, res) => {
       req.params.id,
     ]);
     if (!found.rowCount) throw new HttpError(404, "Employee not found");
-    return savePayItems(client, String(req.params.id), items);
+    const old = (await fetchPayItems(client, [String(req.params.id)])).map(toPayItem);
+    const saved = await savePayItems(client, String(req.params.id), items);
+    if (describeItems(old) !== describeItems(items)) {
+      const name = (await fetchEmployee(String(req.params.id))).name;
+      await logActivity(
+        client,
+        res,
+        `Updated ${name}: pay lines ${describeItems(old)} → ${describeItems(items)}`,
+      );
+    }
+    return saved;
   });
   res.json(saved.map(toPayItem));
 });
@@ -745,11 +923,19 @@ app.put("/me/password", employeeOnly, async (req, res) => {
   }
   checkPassword(next);
   const { salt, hash } = hashPassword(next);
+  // Logins on other devices end; this one carries on with a fresh token.
   await db.query(
-    "UPDATE employees SET salt = $2, password_hash = $3 WHERE id = $1",
-    [me.id, salt, hash],
+    `UPDATE employees SET salt = $2, password_hash = $3, sessions_valid_after = $4
+     WHERE id = $1`,
+    [me.id, salt, hash, new Date()],
   );
-  res.sendStatus(204);
+  await logActivity(db, res, "Changed their staff portal password");
+  const session = sessionOf(res);
+  res.json({
+    token: createToken({ role: "employee", name: session.name, employeeId: me.id }),
+    role: "employee",
+    name: session.name,
+  });
 });
 
 // Employees only see payslips once the month's payroll is marked paid.
@@ -773,6 +959,26 @@ const LEAVE_TYPES: LeaveType[] = [
   "paternity",
   "compassionate",
 ];
+
+/** "Amaka Obi's annual leave, 2 Nov 2026 – 6 Nov 2026 (5 days)", for the log. */
+const describeLeave = (l: LeaveRow) =>
+  `${l.employee_name}'s ${l.type} leave, ${dayName(l.start_date)} – ${dayName(l.end_date)} ` +
+  `(${l.days} day${l.days === 1 ? "" : "s"})`;
+
+/** The public holidays from `start` to `end`. */
+const holidaysBetween = async (
+  start: Day,
+  end: Day,
+  client: PoolClient | typeof db = db,
+) =>
+  new Set(
+    (
+      await client.query<{ day: Day }>(
+        "SELECT day FROM public_holidays WHERE day BETWEEN $1 AND $2",
+        [start, end],
+      )
+    ).rows.map((h) => h.day),
+  );
 
 app.get("/leave", adminOnly, async (_req, res) => {
   const { rows } = await db.query<LeaveRow>(
@@ -814,7 +1020,7 @@ app.post("/leave", anyone, async (req, res) => {
     });
     return;
   }
-  const days = weekdaysBetween(startDate, endDate);
+  const days = weekdaysBetween(startDate, endDate, await holidaysBetween(startDate, endDate));
   if (days === 0) {
     res.status(400).json({ error: "Those dates don't include a working day" });
     return;
@@ -877,11 +1083,19 @@ app.post("/leave", anyone, async (req, res) => {
         isAdmin ? new Date() : null,
       ],
     );
-    return (
+    const leave = (
       await client.query<LeaveRow>(`${LEAVE_SELECT} WHERE l.id = $1`, [
         inserted[0].id,
       ])
     ).rows[0];
+    await logActivity(
+      client,
+      res,
+      isAdmin
+        ? `Recorded ${describeLeave(leave)} (approved)`
+        : `Asked for ${describeLeave(leave)}`,
+    );
+    return leave;
   });
   res.status(201).json(toLeave(row));
 });
@@ -894,37 +1108,47 @@ app.put("/leave/:id/status", adminOnly, async (req, res) => {
     res.status(400).json({ error: "Status must be approved or rejected" });
     return;
   }
-  const { rows } = await db.query<{ id: string }>(
-    `UPDATE leave_requests SET status = $2,
-       decision_note = COALESCE($3, decision_note), decided_at = now()
-     WHERE id = $1 AND status IN ('pending', 'approved') RETURNING id`,
-    [req.params.id, status, optionalText(req.body?.note)],
-  );
-  if (!rows[0]) {
-    res.status(404).json({ error: "No open leave request with that id" });
-    return;
-  }
-  const updated = await db.query<LeaveRow>(`${LEAVE_SELECT} WHERE l.id = $1`, [
-    rows[0].id,
-  ]);
-  res.json(toLeave(updated.rows[0]));
+  const note = optionalText(req.body?.note);
+  const updated = await transaction(async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `UPDATE leave_requests SET status = $2,
+         decision_note = COALESCE($3, decision_note), decided_at = now()
+       WHERE id = $1 AND status IN ('pending', 'approved') RETURNING id`,
+      [req.params.id, status, note],
+    );
+    if (!rows[0]) throw new HttpError(404, "No open leave request with that id");
+    const leave = (
+      await client.query<LeaveRow>(`${LEAVE_SELECT} WHERE l.id = $1`, [rows[0].id])
+    ).rows[0];
+    await logActivity(
+      client,
+      res,
+      `${status === "approved" ? "Approved" : "Rejected"} ${describeLeave(leave)}` +
+        (note ? `: ${note}` : ""),
+    );
+    return leave;
+  });
+  res.json(toLeave(updated));
 });
 
 // Employees can withdraw their own request until it is decided.
 app.put("/leave/:id/cancel", anyone, async (req, res) => {
   const session = sessionOf(res);
-  const { rows } = await db.query<{ id: string }>(
-    `UPDATE leave_requests SET status = 'cancelled', decided_at = now()
-     WHERE id = $1 AND (
-       ($2::text IS NULL AND status IN ('pending', 'approved'))
-       OR (employee_id = $2 AND status = 'pending'))
-     RETURNING id`,
-    [req.params.id, session.role === "admin" ? null : session.employeeId],
-  );
-  if (!rows[0]) {
-    res.status(404).json({ error: "This request can no longer be cancelled" });
-    return;
-  }
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `UPDATE leave_requests SET status = 'cancelled', decided_at = now()
+       WHERE id = $1 AND (
+         ($2::text IS NULL AND status IN ('pending', 'approved'))
+         OR (employee_id = $2 AND status = 'pending'))
+       RETURNING id`,
+      [req.params.id, session.role === "admin" ? null : session.employeeId],
+    );
+    if (!rows[0]) throw new HttpError(404, "This request can no longer be cancelled");
+    const leave = (
+      await client.query<LeaveRow>(`${LEAVE_SELECT} WHERE l.id = $1`, [rows[0].id])
+    ).rows[0];
+    await logActivity(client, res, `Cancelled ${describeLeave(leave)}`);
+  });
   res.sendStatus(204);
 });
 
@@ -964,6 +1188,7 @@ async function buildPayslips(
        AND start_date <= $3 AND end_date >= $2`,
     [ids, start, end],
   );
+  const holidays = await holidaysBetween(start, end, client);
   return employees.map((employee) => {
     const own = items.filter((i) => i.employee_id === employee.id);
     const lines = (kind: PayItemKind) =>
@@ -977,6 +1202,7 @@ async function buildPayslips(
       unpaidLeave: unpaid
         .filter((l) => l.employee_id === employee.id)
         .map((l) => ({ start: l.start_date, end: l.end_date })),
+      holidays,
       bonus: adjustment?.bonus ?? 0,
       otherDeduction: adjustment?.otherDeduction ?? 0,
       note: adjustment?.note ?? null,
@@ -989,9 +1215,10 @@ const savePayslip = (client: PoolClient, p: Payslip) =>
     `INSERT INTO payslips (period, employee_id, employee_no, employee_name,
        job_title, department_name, bank_name, bank_account_number,
        bank_account_name, working_days, days_paid, earnings, deductions, bonus,
-       other_deduction, note, gross, total_deductions, net)
+       other_deduction, note, gross, total_deductions, net, employer_pension,
+       tax_id, pension_provider, pension_pin)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-       $16, $17, $18, $19)`,
+       $16, $17, $18, $19, $20, $21, $22, $23)`,
     [
       p.period,
       p.employeeId,
@@ -1012,6 +1239,10 @@ const savePayslip = (client: PoolClient, p: Payslip) =>
       p.gross,
       p.totalDeductions,
       p.net,
+      p.employerPension,
+      p.taxId ?? null,
+      p.pensionProvider ?? null,
+      p.pensionPin ?? null,
     ],
   );
 
@@ -1072,6 +1303,12 @@ app.post("/payroll", adminOnly, async (req, res) => {
     if (payslips.length === 0)
       throw new HttpError(400, "Nobody was employed in that month");
     for (const payslip of payslips) await savePayslip(client, payslip);
+    const net = round2(payslips.reduce((sum, p) => sum + p.net, 0));
+    await logActivity(
+      client,
+      res,
+      `Ran payroll for ${monthName(period)}: ${payslips.length} people, ${money(net)} net`,
+    );
   });
   res.status(201).json(await fetchRun(period));
 });
@@ -1110,6 +1347,7 @@ app.post("/payroll/:period/recalculate", adminOnly, async (req, res) => {
     for (const payslip of await buildPayslips(client, period, kept))
       if (!paid.has(payslip.employeeId)) await savePayslip(client, payslip);
     await closeIfAllPaid(client, period);
+    await logActivity(client, res, `Recalculated payroll for ${monthName(period)}`);
   });
   res.json(await fetchRun(period));
 });
@@ -1143,6 +1381,13 @@ app.put("/payroll/:period/payslips/:employeeId", adminOnly, async (req, res) => 
       [period, employeeId],
     );
     await savePayslip(client, payslip);
+    await logActivity(
+      client,
+      res,
+      `Set ${payslip.employeeName}'s ${monthName(period)} one-offs: bonus ${money(adjustment.bonus)}, ` +
+        `deduction ${money(adjustment.otherDeduction)}` +
+        (adjustment.note ? ` (${adjustment.note})` : ""),
+    );
   });
   res.json(await fetchRun(period));
 });
@@ -1164,12 +1409,18 @@ app.post("/payroll/:period/payslips/:employeeId/paid", adminOnly, async (req, re
     if (!payslip) throw new HttpError(404, "No payslip for them this month");
     if (payslip.paid_at)
       throw new HttpError(409, `${payslip.employee_name} has already been paid`);
+    const reference = given ?? salaryReference(period, payslip.employee_no);
     await client.query(
       `UPDATE payslips SET paid_at = now(), payment_reference = $3
        WHERE period = $1 AND employee_id = $2`,
-      [period, employeeId, given ?? salaryReference(period, payslip.employee_no)],
+      [period, employeeId, reference],
     );
     await closeIfAllPaid(client, period);
+    await logActivity(
+      client,
+      res,
+      `Marked ${payslip.employee_name} paid for ${monthName(period)}: ${money(payslip.net)} (ref ${reference})`,
+    );
   });
   res.json(await fetchRun(period));
 });
@@ -1179,12 +1430,18 @@ app.delete("/payroll/:period/payslips/:employeeId/paid", adminOnly, async (req, 
   const period = String(req.params.period);
   await transaction(async (client) => {
     await lockDraft(client, period);
-    const { rowCount } = await client.query(
+    const { rows } = await client.query<{ employee_name: string; net: number }>(
       `UPDATE payslips SET paid_at = NULL, payment_reference = NULL
-       WHERE period = $1 AND employee_id = $2 AND paid_at IS NOT NULL`,
+       WHERE period = $1 AND employee_id = $2 AND paid_at IS NOT NULL
+       RETURNING employee_name, net`,
       [period, String(req.params.employeeId)],
     );
-    if (!rowCount) throw new HttpError(404, "They haven't been marked paid");
+    if (!rows[0]) throw new HttpError(404, "They haven't been marked paid");
+    await logActivity(
+      client,
+      res,
+      `Undid ${rows[0].employee_name}'s ${monthName(period)} payment of ${money(rows[0].net)}`,
+    );
   });
   res.json(await fetchRun(period));
 });
@@ -1205,6 +1462,13 @@ app.post("/payroll/:period/paid", adminOnly, async (req, res) => {
         [period, p.employee_id, salaryReference(period, p.employee_no)],
       );
     await closeIfAllPaid(client, period);
+    if (rows.length)
+      await logActivity(
+        client,
+        res,
+        `Marked everyone left paid for ${monthName(period)}: ${rows.length} people, ` +
+          money(round2(rows.reduce((sum, p) => sum + p.net, 0))),
+      );
   });
   res.json(await fetchRun(period));
 });
@@ -1220,8 +1484,89 @@ app.delete("/payroll/:period", adminOnly, async (req, res) => {
     if (paid)
       throw new HttpError(409, "Some people are already paid. Undo those payments first.");
     await client.query("DELETE FROM payroll_runs WHERE period = $1", [period]);
+    await logActivity(client, res, `Deleted the draft payroll for ${monthName(period)}`);
   });
   res.sendStatus(204);
+});
+
+// Opens a locked month again to correct a mistake, with the reason on record.
+// Everyone stays paid; undo the payments that need changing, fix them, and pay
+// again. The month locks once everyone is paid again.
+app.post("/payroll/:period/reopen", adminOnly, async (req, res) => {
+  const period = String(req.params.period);
+  const reason = optionalText(req.body?.reason);
+  if (!reason) {
+    res.status(400).json({ error: "Say why this month is being reopened" });
+    return;
+  }
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ status: PayrollStatus }>(
+      "SELECT status FROM payroll_runs WHERE period = $1 FOR UPDATE",
+      [period],
+    );
+    if (!rows[0]) throw new HttpError(404, "No payroll for that month");
+    if (rows[0].status !== "paid") throw new HttpError(409, "This month is already open");
+    await client.query(
+      "UPDATE payroll_runs SET status = 'draft', paid_at = NULL WHERE period = $1",
+      [period],
+    );
+    await logActivity(client, res, `Reopened ${monthName(period)} to correct it: ${reason}`);
+  });
+  res.json(await fetchRun(period));
+});
+
+/** The amount of the deduction whose name starts with `prefix`, or 0. */
+const deductionOf = (p: Payslip, prefix: string) =>
+  p.deductions.find((d) => d.name.startsWith(prefix))?.amount ?? 0;
+
+const sendCsv = (res: express.Response, name: string, lines: Parameters<typeof toCsv>[0]) =>
+  res.type("text/csv").attachment(name).send(toCsv(lines));
+
+// The month's PAYE, for the remittance to the state's tax office.
+app.get("/payroll/:period/paye.csv", adminOnly, async (req, res) => {
+  const run = await fetchRun(String(req.params.period));
+  if (!run) {
+    res.status(404).json({ error: "No payroll for that month" });
+    return;
+  }
+  sendCsv(res, `paye-${run.period}.csv`, [
+    ["Staff number", "Name", "Tax ID", "Gross pay", "Pension", "NHF", "PAYE"],
+    ...run.payslips
+      .filter((p) => deductionOf(p, "PAYE") > 0)
+      .map((p) => [
+        p.employeeNo,
+        p.employeeName,
+        p.taxId,
+        p.gross.toFixed(2),
+        deductionOf(p, "Pension").toFixed(2),
+        deductionOf(p, "NHF").toFixed(2),
+        deductionOf(p, "PAYE").toFixed(2),
+      ]),
+  ]);
+});
+
+// The month's pension contributions, for the remittance to each PFA.
+app.get("/payroll/:period/pension.csv", adminOnly, async (req, res) => {
+  const run = await fetchRun(String(req.params.period));
+  if (!run) {
+    res.status(404).json({ error: "No payroll for that month" });
+    return;
+  }
+  sendCsv(res, `pension-${run.period}.csv`, [
+    ["Staff number", "Name", "Pension provider", "RSA PIN", "Employee", "Employer", "Total"],
+    ...run.payslips
+      .map((p) => ({ p, own: deductionOf(p, "Pension") }))
+      .filter(({ p, own }) => own + p.employerPension > 0)
+      .map(({ p, own }) => [
+        p.employeeNo,
+        p.employeeName,
+        p.pensionProvider,
+        p.pensionPin,
+        own.toFixed(2),
+        p.employerPension.toFixed(2),
+        round2(own + p.employerPension).toFixed(2),
+      ]),
+  ]);
 });
 
 // The month's bank transfers as a spreadsheet, for the bank's bulk payment upload.
@@ -1231,13 +1576,7 @@ app.get("/payroll/:period/bank.csv", adminOnly, async (req, res) => {
     res.status(404).json({ error: "No payroll for that month" });
     return;
   }
-  const cell = (value: string | number | undefined) => {
-    const text = String(value ?? "");
-    // Quote text with commas or quotes, and stop spreadsheet formulas.
-    const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
-    return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
-  };
-  const lines = [
+  sendCsv(res, `payroll-${run.period}.csv`, [
     ["Staff number", "Name", "Bank", "Account number", "Account name", "Amount", "Reference"],
     // Only people still to pay, so uploading it again can't pay anyone twice.
     ...run.payslips.filter((p) => !p.paidAt).map((p) => [
@@ -1249,11 +1588,7 @@ app.get("/payroll/:period/bank.csv", adminOnly, async (req, res) => {
       p.net.toFixed(2),
       salaryReference(p.period, p.employeeNo),
     ]),
-  ];
-  res
-    .type("text/csv")
-    .attachment(`payroll-${run.period}.csv`)
-    .send(lines.map((line) => line.map(cell).join(",")).join("\n"));
+  ]);
 });
 
 // --- Guarantors ----------------------------------------------------------
@@ -1321,6 +1656,7 @@ const fetchGuarantors = async (employeeId: string) =>
   ).rows.map(toGuarantor);
 
 const addGuarantor = (
+  res: express.Response,
   employeeId: string,
   addedBy: "admin" | "employee",
   body: Record<string, unknown> | undefined,
@@ -1339,11 +1675,17 @@ const addGuarantor = (
     );
     if (rows[0].count >= MAX_GUARANTORS)
       throw new HttpError(409, `Up to ${MAX_GUARANTORS} guarantors can be on file`);
-    const { rows: inserted } = await client.query<GuarantorRow>(
+    const { rows: inserted } = await client.query<GuarantorRow & { employee_name: string }>(
       `INSERT INTO guarantors (name, relationship, phone, email, address,
          occupation, workplace, id, employee_id, added_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING *, (SELECT name FROM employees WHERE id = $9) AS employee_name`,
       [...values, randomUUID(), employeeId, addedBy],
+    );
+    await logActivity(
+      client,
+      res,
+      `Added guarantor ${inserted[0].name} for ${inserted[0].employee_name}`,
     );
     return toGuarantor(inserted[0]);
   });
@@ -1354,7 +1696,7 @@ app.get("/employees/:id/guarantors", adminOnly, async (req, res) => {
 });
 
 app.post("/employees/:id/guarantors", adminOnly, async (req, res) => {
-  res.status(201).json(await addGuarantor(String(req.params.id), "admin", req.body));
+  res.status(201).json(await addGuarantor(res, String(req.params.id), "admin", req.body));
 });
 
 app.get("/me/guarantors", employeeOnly, async (_req, res) => {
@@ -1362,7 +1704,7 @@ app.get("/me/guarantors", employeeOnly, async (_req, res) => {
 });
 
 app.post("/me/guarantors", employeeOnly, async (req, res) => {
-  res.status(201).json(await addGuarantor(sessionOf(res).employeeId!, "employee", req.body));
+  res.status(201).json(await addGuarantor(res, sessionOf(res).employeeId!, "employee", req.body));
 });
 
 // HR can change any guarantor and keeps their verified mark; an employee can
@@ -1370,45 +1712,240 @@ app.post("/me/guarantors", employeeOnly, async (req, res) => {
 app.put("/guarantors/:id", anyone, async (req, res) => {
   const session = sessionOf(res);
   const values = readGuarantorForm(req.body);
-  const { rows } = await db.query<GuarantorRow>(
-    `UPDATE guarantors SET name = $1, relationship = $2, phone = $3, email = $4,
-       address = $5, occupation = $6, workplace = $7, updated_at = now(),
-       verified_at = CASE WHEN $9::text IS NULL THEN verified_at END
-     WHERE id = $8 AND ($9::text IS NULL OR employee_id = $9)
-     RETURNING *`,
-    [...values, req.params.id, session.role === "admin" ? null : session.employeeId],
-  );
-  if (!rows[0]) {
-    res.status(404).json({ error: "Guarantor not found" });
-    return;
-  }
-  res.json(toGuarantor(rows[0]));
+  const row = await transaction(async (client) => {
+    const { rows } = await client.query<GuarantorRow & { employee_name: string }>(
+      `UPDATE guarantors SET name = $1, relationship = $2, phone = $3, email = $4,
+         address = $5, occupation = $6, workplace = $7, updated_at = now(),
+         verified_at = CASE WHEN $9::text IS NULL THEN verified_at END
+       WHERE id = $8 AND ($9::text IS NULL OR employee_id = $9)
+       RETURNING *, (SELECT name FROM employees WHERE id = guarantors.employee_id)
+         AS employee_name`,
+      [...values, req.params.id, session.role === "admin" ? null : session.employeeId],
+    );
+    if (!rows[0]) throw new HttpError(404, "Guarantor not found");
+    await logActivity(
+      client,
+      res,
+      `Changed the details of ${rows[0].employee_name}'s guarantor ${rows[0].name}`,
+    );
+    return rows[0];
+  });
+  res.json(toGuarantor(row));
 });
 
 app.delete("/guarantors/:id", anyone, async (req, res) => {
   const session = sessionOf(res);
-  const { rowCount } = await db.query(
-    "DELETE FROM guarantors WHERE id = $1 AND ($2::text IS NULL OR employee_id = $2)",
-    [req.params.id, session.role === "admin" ? null : session.employeeId],
-  );
-  if (!rowCount) {
-    res.status(404).json({ error: "Guarantor not found" });
-    return;
-  }
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ name: string; employee_name: string }>(
+      `DELETE FROM guarantors WHERE id = $1 AND ($2::text IS NULL OR employee_id = $2)
+       RETURNING name, (SELECT name FROM employees WHERE id = guarantors.employee_id)
+         AS employee_name`,
+      [req.params.id, session.role === "admin" ? null : session.employeeId],
+    );
+    if (!rows[0]) throw new HttpError(404, "Guarantor not found");
+    await logActivity(
+      client,
+      res,
+      `Removed guarantor ${rows[0].name} for ${rows[0].employee_name}`,
+    );
+  });
   res.sendStatus(204);
 });
 
 app.put("/guarantors/:id/verified", adminOnly, async (req, res) => {
-  const { rows } = await db.query<GuarantorRow>(
-    `UPDATE guarantors SET verified_at = CASE WHEN $2 THEN now() END
-     WHERE id = $1 RETURNING *`,
-    [req.params.id, req.body?.verified === true],
+  const verified = req.body?.verified === true;
+  const row = await transaction(async (client) => {
+    const { rows } = await client.query<GuarantorRow & { employee_name: string }>(
+      `UPDATE guarantors SET verified_at = CASE WHEN $2 THEN now() END
+       WHERE id = $1
+       RETURNING *, (SELECT name FROM employees WHERE id = guarantors.employee_id)
+         AS employee_name`,
+      [req.params.id, verified],
+    );
+    if (!rows[0]) throw new HttpError(404, "Guarantor not found");
+    await logActivity(
+      client,
+      res,
+      `${verified ? "Verified" : "Unverified"} ${rows[0].employee_name}'s guarantor ${rows[0].name}`,
+    );
+    return rows[0];
+  });
+  res.json(toGuarantor(row));
+});
+
+// --- Admin accounts --------------------------------------------------------
+
+type AdminRow = {
+  id: string;
+  name: string;
+  email: string;
+  salt: string;
+  password_hash: string;
+  sessions_valid_after: Date;
+  deactivated_at: Date | null;
+  created_at: Date;
+};
+
+const toAdmin = (row: AdminRow): Admin => ({
+  id: row.id,
+  name: row.name,
+  email: row.email,
+  ...(row.deactivated_at !== null ? { deactivatedAt: row.deactivated_at.toISOString() } : {}),
+  createdAt: row.created_at.toISOString(),
+});
+
+app.get("/admins", adminOnly, async (_req, res) => {
+  const { rows } = await db.query<AdminRow>(
+    "SELECT * FROM admins ORDER BY deactivated_at IS NOT NULL, name",
   );
-  if (!rows[0]) {
-    res.status(404).json({ error: "Guarantor not found" });
-    return;
+  res.json(rows.map(toAdmin));
+});
+
+app.post("/admins", adminOnly, async (req, res) => {
+  const name = String(req.body?.name ?? "").trim();
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  const password = String(req.body?.password ?? "");
+  if (!name) throw new HttpError(400, "Enter their name");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    throw new HttpError(400, "Enter a valid email address");
+  checkPassword(password);
+  const { salt, hash } = hashPassword(password);
+  const row = await transaction(async (client) => {
+    const { rows } = await client.query<AdminRow>(
+      `INSERT INTO admins (id, name, email, salt, password_hash)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [randomUUID(), name, email, salt, hash],
+    );
+    await logActivity(client, res, `Added admin ${name} (${email})`);
+    return rows[0];
+  });
+  res.status(201).json(toAdmin(row));
+});
+
+// A new password ends the admin's existing logins.
+app.put("/admins/:id/password", adminOnly, async (req, res) => {
+  const password = String(req.body?.password ?? "");
+  checkPassword(password);
+  const { salt, hash } = hashPassword(password);
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ name: string }>(
+      `UPDATE admins SET salt = $2, password_hash = $3, sessions_valid_after = $4
+       WHERE id = $1 RETURNING name`,
+      [req.params.id, salt, hash, new Date()],
+    );
+    if (!rows[0]) throw new HttpError(404, "Admin not found");
+    await logActivity(client, res, `Set a new password for admin ${rows[0].name}`);
+  });
+  res.sendStatus(204);
+});
+
+// Deactivating logs them out straight away.
+app.put("/admins/:id/active", adminOnly, async (req, res) => {
+  const active = req.body?.active === true;
+  if (!active && sessionOf(res).adminId === req.params.id)
+    throw new HttpError(400, "You can't deactivate yourself");
+  const row = await transaction(async (client) => {
+    const { rows } = await client.query<AdminRow>(
+      `UPDATE admins SET deactivated_at = CASE WHEN $2 THEN NULL
+         ELSE COALESCE(deactivated_at, now()) END
+       WHERE id = $1 RETURNING *`,
+      [req.params.id, active],
+    );
+    if (!rows[0]) throw new HttpError(404, "Admin not found");
+    await logActivity(
+      client,
+      res,
+      `${active ? "Reactivated" : "Deactivated"} admin ${rows[0].name}`,
+    );
+    return rows[0];
+  });
+  res.json(toAdmin(row));
+});
+
+// --- Activity --------------------------------------------------------------
+
+app.get("/activity", adminOnly, async (_req, res) => {
+  const { rows } = await db.query<{ id: string; at: Date; actor: string; summary: string }>(
+    "SELECT * FROM activity_log ORDER BY at DESC, id DESC LIMIT 500",
+  );
+  const activity: Activity[] = rows.map((r) => ({
+    id: String(r.id),
+    at: r.at.toISOString(),
+    actor: r.actor,
+    summary: r.summary,
+  }));
+  res.json(activity);
+});
+
+// --- Public holidays -------------------------------------------------------
+
+// Anyone can see them, so the staff portal's leave form can count days.
+app.get("/holidays", anyone, async (_req, res) => {
+  const { rows } = await db.query<PublicHoliday>(
+    "SELECT day, name FROM public_holidays ORDER BY day",
+  );
+  res.json(rows);
+});
+
+// Leave already booked keeps its day count; new requests use the new list.
+app.post("/holidays", adminOnly, async (req, res) => {
+  const day = String(req.body?.day ?? "");
+  const name = String(req.body?.name ?? "").trim();
+  if (!isDay(day)) throw new HttpError(400, "Choose the day");
+  if (!name) throw new HttpError(400, "Enter the holiday's name");
+  await transaction(async (client) => {
+    await client.query("INSERT INTO public_holidays (day, name) VALUES ($1, $2)", [
+      day,
+      name,
+    ]);
+    await logActivity(client, res, `Added public holiday ${name} on ${dayName(day)}`);
+  });
+  const holiday: PublicHoliday = { day, name };
+  res.status(201).json(holiday);
+});
+
+app.delete("/holidays/:day", adminOnly, async (req, res) => {
+  await transaction(async (client) => {
+    const { rows } = await client.query<PublicHoliday>(
+      "DELETE FROM public_holidays WHERE day = $1 RETURNING day, name",
+      [isDay(String(req.params.day)) ? String(req.params.day) : null],
+    );
+    if (!rows[0]) throw new HttpError(404, "That day isn't a public holiday");
+    await logActivity(
+      client,
+      res,
+      `Removed public holiday ${rows[0].name} on ${dayName(rows[0].day)}`,
+    );
+  });
+  res.sendStatus(204);
+});
+
+// --- Backup ----------------------------------------------------------------
+
+// Everything in the HR database as one file, to keep somewhere safe. Password
+// hashes are left out; after a restore, give everyone a new password.
+app.get("/backup", adminOnly, async (_req, res) => {
+  const tables = [
+    "departments",
+    "employees",
+    "pay_items",
+    "leave_requests",
+    "payroll_runs",
+    "payslips",
+    "guarantors",
+    "public_holidays",
+    "admins",
+    "activity_log",
+  ];
+  const data: Record<string, unknown[]> = {};
+  for (const table of tables) {
+    const { rows } = await db.query(`SELECT * FROM ${table}`);
+    data[table] = rows.map(({ salt: _salt, password_hash: _hash, ...rest }) => rest);
   }
-  res.json(toGuarantor(rows[0]));
+  await logActivity(db, res, "Downloaded a backup of all HR data");
+  res
+    .attachment(`hr-backup-${today()}.json`)
+    .json({ exportedAt: new Date().toISOString(), tables: data });
 });
 
 // --- Errors ----------------------------------------------------------------
@@ -1418,6 +1955,8 @@ const UNIQUE_MESSAGES: Record<string, string> = {
   employees_email_key: "Another employee already uses that email",
   employees_employee_no_key: "Another employee already has that staff number",
   departments_name_key: "There is already a department with that name",
+  admins_email_key: "Another admin already uses that email",
+  public_holidays_pkey: "That day is already a public holiday",
 };
 
 const errorHandler: express.ErrorRequestHandler = (err, _req, res, _next) => {

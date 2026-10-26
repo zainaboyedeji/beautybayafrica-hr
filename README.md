@@ -19,15 +19,19 @@ corepack pnpm --filter api db:migrate
 corepack pnpm dev                        # API on :4100, site on :3100
 ```
 
-Log in at http://localhost:3100/login: **Admin** tab with `ADMIN_PASSWORD`.
-Add departments and employees, then on an employee's **Portal** button give them a
+Log in at http://localhost:3100/login: **Admin** tab, email left empty, with
+`ADMIN_PASSWORD` (the owner's login). Under **Settings**, give each person who runs
+HR their own admin login, so the **Activity** page shows who did what. Add
+departments and employees, then on an employee's **Portal** button give them a
 password; they log in on the **Employee** tab with their work email.
 
 ## How it works
 
 **Leave.** Employees ask for leave in the staff portal; the admin approves or
 rejects it on the Leave page (leave the admin records is approved straight away).
-Only Monday to Friday counts. Annual leave is limited to each employee's yearly
+Only Monday to Friday counts, less the public holidays listed under **Settings**
+(the fixed ones and Easter are filled in; add the Islamic holidays once they are
+announced). Annual leave is limited to each employee's yearly
 allowance, counting requests still waiting. Overlapping requests are refused.
 
 **Payroll.** Pick a month and **Run payroll**: everyone employed in that month gets a
@@ -37,21 +41,39 @@ draft payslip:
   employed, less approved **unpaid** leave (so joiners and leavers are pro-rated).
 - Each employee's pay is set on their form (**Add / Edit employee**): basic salary,
   allowances, deductions, pension and PAYE.
-- Pension: the % set for that employee, of basic + allowances (`0` for none).
+- Pension: the % set for that employee, of basic + allowances (`0` for none). An
+  employer pension % is worked out too; it is paid on top, not deducted.
+- NHF, if ticked: 2.5% of basic salary.
 - PAYE, per employee: **None**, a **fixed** monthly amount you enter (pro-rated
   like their pay), or **worked out** from the Nigeria Tax Act 2025 bands (from
-  January 2026) on pay after pension. Reliefs the app doesn't track (rent relief,
-  NHF, life insurance) are left out.
+  January 2026) on pay after pension and NHF. Reliefs the app doesn't track (rent
+  relief, life insurance) are left out.
 - Fixed deductions (loans, advances) are taken in full; a one-off bonus or deduction
   can be added per payslip while the payroll is a draft.
 
 **Recalculate** updates a draft after changes. **Bank file (CSV)** lists each net
-payment for a bulk transfer. **Mark paid** locks the month and shows the payslips to
-employees. Payslips keep a copy of every figure, so later changes don't rewrite them.
+payment for a bulk transfer; **PAYE schedule** and **Pension schedule** are the
+month's remittances, with each employee's tax ID, PFA and RSA PIN. **Mark paid**
+locks the month and shows the payslips to employees. Payslips keep a copy of every
+figure, so later changes don't rewrite them. To correct a locked month, **Reopen
+month** with a reason, undo the payments that need changing, fix them and pay again.
+
+**Records.** Every change (who, what, when) goes in the **Activity** log, which
+can't be edited. **Settings → Download backup** saves all the data as one file:
+do it monthly and after each payroll, as Neon on the free plan can only roll
+back 6 hours. A new password, or deactivating someone, ends their logins at once.
+
+## Tests
+
+`apps/api/test/smoke.mjs` runs the whole app through its API (about 200 checks).
+It writes test data, so run it against a Neon branch, never the real database;
+the steps are at the top of the file. Run it before each deploy.
 
 ## Deploy (Render + Neon)
 
 Push to GitHub → Render → **New → Blueprint** → pick the repo, then fill in
 `DATABASE_URL`, `DATABASE_URL_UNPOOLED` and `ADMIN_PASSWORD`. The API runs new
-migrations each time it starts. If the API's address differs from
+migrations each time it starts. On Render's free plan the API sleeps when no one
+uses it, so the first login after a quiet spell takes up to a minute (the login page
+says so); the paid plan keeps it awake. If the API's address differs from
 `https://beautybayafrica-hr-api.onrender.com`, change `NEXT_PUBLIC_API_URL` in `render.yaml`.
