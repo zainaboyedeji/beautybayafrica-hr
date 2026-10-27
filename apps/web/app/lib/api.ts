@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type {
+  Contract,
+  ContractTemplate,
+  OutboxEmail,
   Activity,
   Admin,
   Announcement,
@@ -85,6 +88,26 @@ export const fetchHolidays = getJson<PublicHoliday[]>("/holidays");
 export const fetchAnnouncements = getJson<Announcement[]>("/announcements");
 export const fetchRequests = getJson<StaffRequest[]>("/requests");
 export const fetchMyRequests = getJson<StaffRequest[]>("/requests/mine");
+export const fetchContractTemplates = getJson<ContractTemplate[]>("/contract-templates");
+export const fetchEmails = getJson<OutboxEmail[]>("/emails");
+export const fetchMyContracts = getJson<Contract[]>("/me/contracts");
+export const fetchContracts = (employeeId: string) =>
+  getJson<Contract[]>(`/employees/${employeeId}/contracts`)();
+
+/**
+ * Calls a link page's API without a login (the link's token is the key),
+ * returning its answer or throwing its error message.
+ */
+export async function publicCall<T>(path: string, init?: { method: string; body: unknown }) {
+  const res = await fetch(`${API_URL}${path}`, {
+    method: init?.method ?? "GET",
+    headers: init ? { "Content-Type": "application/json" } : undefined,
+    body: init ? JSON.stringify(init.body) : undefined,
+  });
+  const answer = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(answer.error ?? "Something went wrong");
+  return answer as T;
+}
 
 /** Saves a file from the API (a CSV, a backup) to the user's computer. */
 export async function downloadFile(path: string, fileName: string, fallback: string) {

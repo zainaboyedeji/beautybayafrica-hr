@@ -66,6 +66,18 @@ cancel leave, view and print payslips with year-to-date totals, add a profile
 photo, keep their phone, address, date of birth and emergency contact up to date,
 and manage their guarantors. Bank details stay with HR and are shown masked.
 
+**Contracts and onboarding.** HR writes contract templates under **Settings →
+Contract templates**, with blanks such as `{{name}}`, `{{job_title}}`,
+`{{start_date}}` and `{{basic_salary}}` filled in for each person. Adding an
+employee with their personal email can email them their contract straight away
+(or later, from their **Contract** button). They read it through the link, type
+their full name and accept; a second email then gives them a link to choose their
+own password and log in with their work email. HR sees each contract's progress,
+can resend or withdraw it, and downloads the signed copy as a PDF. Emails go out
+through any SMTP account (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`,
+`MAIL_FROM`; links use `SITE_URL`). Until SMTP is set, emails are kept under
+**Settings → Emails sent** so their links can be copied by hand.
+
 **Passwords and requests.** A password HR gives (Employees → **Portal**) is
 temporary: the next time the employee logs in, they must choose their own before
 they can do anything else. After that only HR changes it. Staff ask HR for a new

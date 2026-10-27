@@ -34,10 +34,12 @@ import StatusBadge from "../components/status-badge";
 import {
   apiSend,
   describeError,
+  downloadFile,
   fetchAnnouncements,
   fetchHolidays,
   fetchMe,
   fetchMyLeave,
+  fetchMyContracts,
   fetchMyPayslips,
   fetchMyRequests,
   money,
@@ -681,6 +683,7 @@ function ProfileTab({
           </div>
           <dl className="mt-4 divide-y divide-line text-sm">
             <Row label="Work email" value={profile.email} />
+            <Row label="Personal email" value={profile.personalEmail} />
             <Row label="Phone" value={profile.phone} />
             <Row label="Date of birth" value={profile.dateOfBirth && formatDay(profile.dateOfBirth)} />
             <Row label="Home address" value={profile.homeAddress} />
@@ -718,6 +721,8 @@ function ProfileTab({
           </p>
         </section>
       </div>
+
+      <MyContracts />
 
       <section>
         <Heading icon="users" tint="bg-violet-100 text-violet-700" title="My guarantors" />
@@ -775,6 +780,7 @@ function DetailsForm({
     emergencyName: profile.emergencyName ?? "",
     emergencyRelationship: profile.emergencyRelationship ?? "",
     emergencyPhone: profile.emergencyPhone ?? "",
+    personalEmail: profile.personalEmail ?? "",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -814,6 +820,10 @@ function DetailsForm({
           <input type="date" max={today()} {...field("dateOfBirth")} />
         </label>
       </div>
+      <label className="text-sm font-medium">
+        Personal email <span className="font-normal text-muted">(HR emails you here)</span>
+        <input type="email" {...field("personalEmail")} />
+      </label>
       <label className="text-sm font-medium">
         Home address
         <textarea rows={2} {...field("homeAddress")} />
@@ -1124,6 +1134,42 @@ function ChooseOwnPassword({ name }: { name: string }) {
           {saving ? "Saving…" : "Save and continue"}
         </button>
       </form>
+    </section>
+  );
+}
+
+/** Contracts they have accepted, to download. */
+function MyContracts() {
+  const contracts = useLoad(fetchMyContracts);
+  const [error, setError] = useState<string | null>(null);
+  if (!contracts.data?.length) return null;
+  return (
+    <section className={CARD}>
+      <Heading icon="pencil" tint="bg-emerald-100 text-emerald-800" title="My contract" small />
+      {error && <p className="mt-2 text-sm text-red-700">{error}</p>}
+      <ul className="mt-3 divide-y divide-line text-sm">
+        {contracts.data.map((c) => (
+          <li key={c.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
+            <span>
+              <span className="block font-medium">{c.title}</span>
+              <span className="block text-muted">
+                Accepted {new Date(c.acceptedAt!).toLocaleDateString("en-NG", { dateStyle: "long" })}
+              </span>
+            </span>
+            <button
+              onClick={() =>
+                void downloadFile(`/me/contracts/${c.id}/pdf`, `Contract ${c.title}.pdf`, "Could not download it").catch(
+                  (e) => setError(describeError(e, "Could not download it")),
+                )
+              }
+              className={SECONDARY_BUTTON}
+            >
+              <Icon name="download" className="h-4 w-4" />
+              Download PDF
+            </button>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

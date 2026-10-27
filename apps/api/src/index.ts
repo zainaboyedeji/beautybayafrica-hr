@@ -28,10 +28,17 @@ import {
 } from "./payroll";
 import { COMPANY_EMAIL_DOMAIN, isCompanyEmail, salaryReference } from "@hr/types";
 import { payslipPdf } from "./payslip-pdf";
+import { contractPdf } from "./contract-pdf";
+import { sendEmail } from "./mailer";
 import express from "express";
 import type { PoolClient } from "pg";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type {
+  Contract,
+  ContractStatus,
+  ContractTemplate,
+  OutboxEmail,
+  PublicContract,
   Activity,
   Admin,
   Announcement,
@@ -161,6 +168,10 @@ type EmployeeRow = {
   emergency_name: string | null;
   emergency_relationship: string | null;
   emergency_phone: string | null;
+  personal_email: string | null;
+  setup_token_hash: string | null;
+  setup_token_expires_at: Date | null;
+  contract_status?: ContractStatus | null;
   photo_updated_at?: Date | null;
   bank_name: string | null;
   bank_account_number: string | null;
@@ -212,6 +223,12 @@ const toEmployee = (row: EmployeeRow): Employee => ({
     ? { emergencyRelationship: row.emergency_relationship }
     : {}),
   ...(row.emergency_phone !== null ? { emergencyPhone: row.emergency_phone } : {}),
+  ...(row.personal_email !== null ? { personalEmail: row.personal_email } : {}),
+  ...(row.contract_status ? { contractStatus: row.contract_status } : {}),
+  setupPending:
+    row.setup_token_hash !== null &&
+    row.setup_token_expires_at !== null &&
+    row.setup_token_expires_at > new Date(),
   annualLeaveDays: row.annual_leave_days,
   annualLeaveTaken: row.annual_leave_taken,
   canLogIn: row.password_hash !== null,
@@ -237,6 +254,9 @@ const EMPLOYEE_SELECT = `
     ), 0) AS monthly_allowances,
     (SELECT p.updated_at FROM employee_photos p WHERE p.employee_id = e.id)
       AS photo_updated_at,
+    (SELECT c.status FROM contracts c
+     WHERE c.employee_id = e.id AND c.status <> 'withdrawn'
+     ORDER BY c.sent_at DESC LIMIT 1) AS contract_status,
     (SELECT count(*) FROM guarantors g WHERE g.employee_id = e.id)::int
       AS guarantor_count,
     (SELECT count(*) FROM guarantors g
@@ -646,6 +666,9 @@ const readPersonalDetails = (body: Record<string, unknown> | undefined) => {
   const dateOfBirth = optionalText(body?.dateOfBirth);
   if (dateOfBirth !== null && (!isDay(dateOfBirth) || dateOfBirth >= today()))
     throw new HttpError(400, "Enter a real date of birth");
+  const personalEmail = optionalText(body?.personalEmail)?.toLowerCase() ?? null;
+  if (personalEmail !== null && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(personalEmail))
+    throw new HttpError(400, "Enter a valid personal email, or leave it empty");
   return [
     optionalText(body?.phone),
     dateOfBirth,
@@ -653,6 +676,7 @@ const readPersonalDetails = (body: Record<string, unknown> | undefined) => {
     optionalText(body?.emergencyName),
     optionalText(body?.emergencyRelationship),
     optionalText(body?.emergencyPhone),
+    personalEmail,
   ];
 };
 const PERSONAL_COLUMNS = [
@@ -662,6 +686,7 @@ const PERSONAL_COLUMNS = [
   "emergency_name",
   "emergency_relationship",
   "emergency_phone",
+  "personal_email",
 ] as const;
 
 // The columns readEmployeeForm's values go into, in order, and how a change
@@ -694,6 +719,7 @@ const EMPLOYEE_FIELDS: [column: keyof EmployeeRow, label: string, show?: (v: nev
   ["emergency_name", "emergency contact"],
   ["emergency_relationship", "emergency contact's relationship"],
   ["emergency_phone", "emergency contact's phone"],
+  ["personal_email", "personal email"],
 ];
 const EMPLOYEE_COLUMNS = EMPLOYEE_FIELDS.map(([column]) => column);
 
@@ -740,6 +766,15 @@ app.post("/employees", adminOnly, async (req, res) => {
   const login = password ? hashPassword(password) : null;
   // Allowances and deductions can be given with the rest of the form.
   const items = Array.isArray(req.body?.items) ? readPayItems(req.body.items) : [];
+  // Optionally, a contract template to email them straight away.
+  const contractTemplateId = optionalText(req.body?.contractTemplateId);
+  if (contractTemplateId && !values[EMPLOYEE_COLUMNS.indexOf("personal_email")])
+    throw new HttpError(400, "Add their personal email, so their contract can be sent there");
+  if (
+    contractTemplateId &&
+    !(await db.query("SELECT 1 FROM contract_templates WHERE id = $1", [contractTemplateId])).rowCount
+  )
+    throw new HttpError(400, "That contract template no longer exists");
   const id = randomUUID();
   await transaction(async (client) => {
     // A password HR gives is temporary: they choose their own when they log in.
@@ -757,6 +792,7 @@ app.post("/employees", adminOnly, async (req, res) => {
         (items.length ? `, with ${describeItems(items)}` : ""),
     );
   });
+  if (contractTemplateId) await sendContract(res, id, contractTemplateId);
   res.status(201).json(toEmployee(await fetchEmployee(id)));
 });
 
@@ -2162,6 +2198,535 @@ app.put("/admins/:id/active", adminOnly, async (req, res) => {
   res.json(toAdmin(row));
 });
 
+// --- Contracts and account set-up ------------------------------------------
+
+// Where the site is, for the links in emails.
+const SITE_URL = (process.env.SITE_URL ?? "http://localhost:3100").replace(/\/$/, "");
+const CONTRACT_LINK_DAYS = 14;
+const SETUP_LINK_DAYS = 7;
+
+/** A long random link token; only its hash is stored. */
+const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
+const newToken = () => {
+  const token = randomBytes(32).toString("base64url");
+  return { token, hash: hashToken(token) };
+};
+const daysFromNow = (days: number) => new Date(Date.now() + days * 86_400_000);
+
+type TemplateRow = { id: string; name: string; body: string; updated_at: Date };
+const toTemplate = (row: TemplateRow): ContractTemplate => ({
+  id: row.id,
+  name: row.name,
+  body: row.body,
+  updatedAt: row.updated_at.toISOString(),
+});
+
+type ContractRow = {
+  id: string;
+  employee_id: string;
+  template_name: string | null;
+  title: string;
+  body: string;
+  status: ContractStatus;
+  token_expires_at: Date;
+  sent_by: string;
+  sent_at: Date;
+  viewed_at: Date | null;
+  accepted_at: Date | null;
+  accepted_name: string | null;
+  accepted_ip: string | null;
+};
+const toContract = (row: ContractRow): Contract => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  ...(row.template_name !== null ? { templateName: row.template_name } : {}),
+  title: row.title,
+  body: row.body,
+  status: row.status,
+  sentBy: row.sent_by,
+  sentAt: row.sent_at.toISOString(),
+  ...(row.viewed_at !== null ? { viewedAt: row.viewed_at.toISOString() } : {}),
+  expiresAt: row.token_expires_at.toISOString(),
+  ...(row.accepted_at !== null ? { acceptedAt: row.accepted_at.toISOString() } : {}),
+  ...(row.accepted_name !== null ? { acceptedName: row.accepted_name } : {}),
+  ...(row.accepted_ip !== null ? { acceptedIp: row.accepted_ip } : {}),
+});
+
+const EMPLOYMENT_WORDS: Record<EmploymentType, string> = {
+  full_time: "full-time",
+  part_time: "part-time",
+  contract: "fixed-term contract",
+  intern: "internship",
+};
+
+/**
+ * The {{blanks}} a contract template can use, for one employee. Unknown
+ * blanks are left as they are, so a typo shows up in the preview.
+ */
+export const CONTRACT_BLANKS = [
+  "name", "first_name", "job_title", "department", "employment_type", "start_date",
+  "basic_salary", "allowances", "monthly_pay", "annual_leave_days", "work_email",
+  "personal_email", "staff_number", "company", "today",
+] as const;
+
+async function fillContract(client: PoolClient | typeof db, employeeId: string, body: string) {
+  const e = await fetchEmployee(employeeId);
+  if (!e) throw new HttpError(404, "Employee not found");
+  const items = (await fetchPayItems(client, [employeeId])).filter((i) => i.kind === "allowance");
+  const allowances = items.reduce((sum, i) => sum + i.amount, 0);
+  const values: Record<(typeof CONTRACT_BLANKS)[number], string> = {
+    name: e.name,
+    first_name: e.name.split(/\s+/)[0],
+    job_title: e.job_title,
+    department: e.department_name ?? "the Company",
+    employment_type: EMPLOYMENT_WORDS[e.employment_type],
+    start_date: dayName(e.start_date),
+    basic_salary: money(e.base_salary),
+    allowances: items.length ? items.map((i) => `${i.name} ${money(i.amount)}`).join(", ") : "none",
+    monthly_pay: money(round2(e.base_salary + allowances)),
+    annual_leave_days: String(e.annual_leave_days),
+    work_email: e.email,
+    personal_email: e.personal_email ?? "",
+    staff_number: e.employee_no,
+    company: COMPANY_NAME,
+    today: dayName(today()),
+  };
+  return {
+    employee: e,
+    body: body.replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (whole, key: string) =>
+      key in values ? values[key as keyof typeof values] : whole,
+    ),
+  };
+}
+
+const contractEmail = (name: string, link: string) =>
+  [
+    `Dear ${name.split(/\s+/)[0]},`,
+    "",
+    `Welcome to ${COMPANY_NAME}! Your employment contract is ready for you to read and accept:`,
+    "",
+    link,
+    "",
+    `The link works for ${CONTRACT_LINK_DAYS} days. Once you accept, you'll get a second email showing you how to set up your ${COMPANY_NAME} HR account, where you'll see your payslips and ask for leave.`,
+    "",
+    "If you have any questions about the contract, reply to this email or speak to HR.",
+    "",
+    `${COMPANY_NAME} HR`,
+  ].join("\n");
+
+const setupEmail = (name: string, workEmail: string, link: string) =>
+  [
+    `Dear ${name.split(/\s+/)[0]},`,
+    "",
+    `Thank you for accepting your contract. Now set up your ${COMPANY_NAME} HR account:`,
+    "",
+    `1. Open this link and choose your own password (it works for ${SETUP_LINK_DAYS} days):`,
+    `   ${link}`,
+    `2. Then log in at ${SITE_URL}/login on the Employee tab, with your work email:`,
+    `   ${workEmail}`,
+    "",
+    "In the HR account you can see your payslips, check your leave and ask for time off, keep your details up to date, and send HR requests.",
+    "",
+    "Keep your password to yourself. If you ever forget it, use \"Forgotten your password?\" on the login page.",
+    "",
+    `${COMPANY_NAME} HR`,
+  ].join("\n");
+
+/**
+ * Makes a contract for an employee from a template (or wording HR edited),
+ * withdraws any earlier one they haven't accepted, and emails them the link.
+ */
+async function sendContract(
+  res: express.Response,
+  employeeId: string,
+  templateId: string,
+  editedBody?: string | null,
+) {
+  const { contract, token, employee } = await transaction(async (client) => {
+    const { rows: templates } = await client.query<TemplateRow>(
+      "SELECT * FROM contract_templates WHERE id = $1",
+      [templateId],
+    );
+    const template = templates[0];
+    if (!template) throw new HttpError(400, "Choose a contract template");
+    const filled = await fillContract(client, employeeId, editedBody ?? template.body);
+    if (!filled.employee.personal_email)
+      throw new HttpError(400, "Add their personal email first, so the contract can be sent there");
+    await client.query(
+      "UPDATE contracts SET status = 'withdrawn' WHERE employee_id = $1 AND status IN ('sent', 'viewed')",
+      [employeeId],
+    );
+    const { token, hash } = newToken();
+    const { rows } = await client.query<ContractRow>(
+      `INSERT INTO contracts (id, employee_id, template_name, title, body, token_hash,
+         token_expires_at, sent_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [
+        randomUUID(),
+        employeeId,
+        template.name,
+        template.name,
+        filled.body,
+        hash,
+        daysFromNow(CONTRACT_LINK_DAYS),
+        actorOf(sessionOf(res)),
+      ],
+    );
+    await logActivity(
+      client,
+      res,
+      `Sent ${filled.employee.name} the "${template.name}" contract at ${filled.employee.personal_email}`,
+    );
+    return { contract: rows[0], token, employee: filled.employee };
+  });
+  // Sent once the contract is saved, so an email never points at nothing.
+  await sendEmail({
+    to: employee.personal_email!,
+    subject: `Your employment contract from ${COMPANY_NAME}`,
+    text: contractEmail(employee.name, `${SITE_URL}/contract?t=${token}`),
+    employeeId,
+  });
+  return contract;
+}
+
+/** Gives an employee a fresh link to choose their password, and emails it. */
+async function sendSetupLink(
+  client: PoolClient,
+  employee: { id: string; name: string; email: string; personal_email: string | null },
+) {
+  if (!employee.personal_email) throw new HttpError(400, "Add their personal email first");
+  const { token, hash } = newToken();
+  await client.query(
+    "UPDATE employees SET setup_token_hash = $2, setup_token_expires_at = $3 WHERE id = $1",
+    [employee.id, hash, daysFromNow(SETUP_LINK_DAYS)],
+  );
+  return () =>
+    sendEmail({
+      to: employee.personal_email!,
+      subject: `Set up your ${COMPANY_NAME} HR account`,
+      text: setupEmail(employee.name, employee.email, `${SITE_URL}/setup?t=${token}`),
+      employeeId: employee.id,
+    });
+}
+
+// --- Contract templates (HR) ---
+
+app.get("/contract-templates", adminOnly, async (_req, res) => {
+  const { rows } = await db.query<TemplateRow>("SELECT * FROM contract_templates ORDER BY name");
+  res.json(rows.map(toTemplate));
+});
+
+/** A template's name and wording from a request body, checked. */
+const readTemplate = (body: Record<string, unknown> | undefined) => {
+  const name = String(body?.name ?? "").trim();
+  const text = String(body?.body ?? "").trim();
+  if (!name || !text) throw new HttpError(400, "Give the template a name and its wording");
+  if (text.length > 50_000) throw new HttpError(400, "That contract is too long");
+  return { name, body: text };
+};
+
+app.post("/contract-templates", adminOnly, async (req, res) => {
+  const t = readTemplate(req.body);
+  const row = await transaction(async (client) => {
+    const { rows } = await client.query<TemplateRow>(
+      "INSERT INTO contract_templates (id, name, body) VALUES ($1, $2, $3) RETURNING *",
+      [randomUUID(), t.name, t.body],
+    );
+    await logActivity(client, res, `Added the "${t.name}" contract template`);
+    return rows[0];
+  });
+  res.status(201).json(toTemplate(row));
+});
+
+// Contracts already sent keep the wording they were sent with.
+app.put("/contract-templates/:id", adminOnly, async (req, res) => {
+  const t = readTemplate(req.body);
+  const row = await transaction(async (client) => {
+    const { rows } = await client.query<TemplateRow>(
+      `UPDATE contract_templates SET name = $2, body = $3, updated_at = clock_timestamp()
+       WHERE id = $1 RETURNING *`,
+      [req.params.id, t.name, t.body],
+    );
+    if (!rows[0]) throw new HttpError(404, "Template not found");
+    await logActivity(client, res, `Edited the "${t.name}" contract template`);
+    return rows[0];
+  });
+  res.json(toTemplate(row));
+});
+
+app.delete("/contract-templates/:id", adminOnly, async (req, res) => {
+  await transaction(async (client) => {
+    const { rows } = await client.query<{ name: string }>(
+      "DELETE FROM contract_templates WHERE id = $1 RETURNING name",
+      [req.params.id],
+    );
+    if (!rows[0]) throw new HttpError(404, "Template not found");
+    await logActivity(client, res, `Deleted the "${rows[0].name}" contract template`);
+  });
+  res.sendStatus(204);
+});
+
+// The wording a template gives for one employee, before it is sent.
+app.post("/employees/:id/contract-preview", adminOnly, async (req, res) => {
+  const { rows } = await db.query<TemplateRow>("SELECT * FROM contract_templates WHERE id = $1", [
+    String(req.body?.templateId ?? ""),
+  ]);
+  if (!rows[0]) throw new HttpError(400, "Choose a contract template");
+  const filled = await fillContract(db, String(req.params.id), rows[0].body);
+  res.json({ title: rows[0].name, body: filled.body });
+});
+
+// --- Contracts (HR) ---
+
+app.get("/employees/:id/contracts", adminOnly, async (req, res) => {
+  const { rows } = await db.query<ContractRow>(
+    "SELECT * FROM contracts WHERE employee_id = $1 ORDER BY sent_at DESC",
+    [req.params.id],
+  );
+  res.json(rows.map(toContract));
+});
+
+app.post("/employees/:id/contracts", adminOnly, async (req, res) => {
+  const contract = await sendContract(
+    res,
+    String(req.params.id),
+    String(req.body?.templateId ?? ""),
+    optionalText(req.body?.body),
+  );
+  res.status(201).json(toContract(contract));
+});
+
+// A new link (the old one stops working) and the email again.
+app.post("/contracts/:id/resend", adminOnly, async (req, res) => {
+  const { row, token, employee } = await transaction(async (client) => {
+    const { token, hash } = newToken();
+    const { rows } = await client.query<ContractRow>(
+      `UPDATE contracts SET token_hash = $2, token_expires_at = $3
+       WHERE id = $1 AND status IN ('sent', 'viewed') RETURNING *`,
+      [req.params.id, hash, daysFromNow(CONTRACT_LINK_DAYS)],
+    );
+    if (!rows[0]) throw new HttpError(404, "No contract waiting with that id");
+    const employee = await fetchEmployee(rows[0].employee_id);
+    if (!employee.personal_email) throw new HttpError(400, "Add their personal email first");
+    await logActivity(client, res, `Resent ${employee.name}'s contract to ${employee.personal_email}`);
+    return { row: rows[0], token, employee };
+  });
+  await sendEmail({
+    to: employee.personal_email!,
+    subject: `Your employment contract from ${COMPANY_NAME}`,
+    text: contractEmail(employee.name, `${SITE_URL}/contract?t=${token}`),
+    employeeId: employee.id,
+  });
+  res.json(toContract(row));
+});
+
+app.put("/contracts/:id/withdraw", adminOnly, async (req, res) => {
+  const row = await transaction(async (client) => {
+    const { rows } = await client.query<ContractRow>(
+      `UPDATE contracts SET status = 'withdrawn'
+       WHERE id = $1 AND status IN ('sent', 'viewed') RETURNING *`,
+      [req.params.id],
+    );
+    if (!rows[0]) throw new HttpError(404, "No contract waiting with that id");
+    const employee = await fetchEmployee(rows[0].employee_id);
+    await logActivity(client, res, `Withdrew ${employee.name}'s contract`);
+    return rows[0];
+  });
+  res.json(toContract(row));
+});
+
+const sendContractPdf = async (res: express.Response, row: ContractRow) => {
+  const employee = await fetchEmployee(row.employee_id);
+  res
+    .type("application/pdf")
+    .attachment(`Contract ${employee.name}.pdf`)
+    .send(await contractPdf(toContract(row), COMPANY_NAME, employee.name));
+};
+
+app.get("/contracts/:id/pdf", adminOnly, async (req, res) => {
+  const { rows } = await db.query<ContractRow>("SELECT * FROM contracts WHERE id = $1", [
+    req.params.id,
+  ]);
+  if (!rows[0]) throw new HttpError(404, "Contract not found");
+  await sendContractPdf(res, rows[0]);
+});
+
+// HR sends (again) the email with a link to set up their account.
+app.post("/employees/:id/setup-email", adminOnly, async (req, res) => {
+  const send = await transaction(async (client) => {
+    const { rows } = await client.query<EmployeeRow>(
+      "SELECT * FROM employees WHERE id = $1 FOR UPDATE",
+      [req.params.id],
+    );
+    if (!rows[0]) throw new HttpError(404, "Employee not found");
+    const send = await sendSetupLink(client, rows[0]);
+    await logActivity(
+      client,
+      res,
+      `Sent ${rows[0].name} an account set-up link at ${rows[0].personal_email}`,
+    );
+    return send;
+  });
+  await send();
+  res.json(toEmployee(await fetchEmployee(String(req.params.id))));
+});
+
+// --- Contracts (the employee's own, in the portal) ---
+
+app.get("/me/contracts", employeeOnly, async (_req, res) => {
+  const { rows } = await db.query<ContractRow>(
+    "SELECT * FROM contracts WHERE employee_id = $1 AND status = 'accepted' ORDER BY accepted_at DESC",
+    [sessionOf(res).employeeId],
+  );
+  res.json(rows.map(toContract));
+});
+
+app.get("/me/contracts/:id/pdf", employeeOnly, async (req, res) => {
+  const { rows } = await db.query<ContractRow>(
+    "SELECT * FROM contracts WHERE id = $1 AND employee_id = $2 AND status = 'accepted'",
+    [req.params.id, sessionOf(res).employeeId],
+  );
+  if (!rows[0]) throw new HttpError(404, "Contract not found");
+  await sendContractPdf(res, rows[0]);
+});
+
+// --- Contract and set-up links (no login: the link is the key) ---
+
+const contractByToken = async (client: PoolClient | typeof db, token: string, lock = false) =>
+  (
+    await client.query<ContractRow>(
+      `SELECT * FROM contracts WHERE token_hash = $1${lock ? " FOR UPDATE" : ""}`,
+      [hashToken(token)],
+    )
+  ).rows[0];
+
+app.get("/public/contracts/:token", async (req, res) => {
+  const row = await contractByToken(db, String(req.params.token));
+  if (!row) throw new HttpError(404, "This link isn't valid. Ask HR to send your contract again.");
+  if (row.status === "withdrawn")
+    throw new HttpError(410, "This contract was withdrawn. HR will send you a new one.");
+  const expired = row.status !== "accepted" && row.token_expires_at < new Date();
+  if (row.status === "sent" && !expired)
+    await db.query("UPDATE contracts SET status = 'viewed', viewed_at = now() WHERE id = $1", [row.id]);
+  const employee = await fetchEmployee(row.employee_id);
+  const contract: PublicContract = {
+    company: COMPANY_NAME,
+    employeeName: employee.name,
+    title: row.title,
+    body: row.body,
+    status: row.status === "sent" && !expired ? "viewed" : row.status,
+    expired,
+    ...(row.accepted_at ? { acceptedAt: row.accepted_at.toISOString() } : {}),
+    ...(row.accepted_name ? { acceptedName: row.accepted_name } : {}),
+  };
+  res.json(contract);
+});
+
+// Accepting needs their full name typed, as a signature. Their account set-up
+// email follows straight away, unless they can already log in.
+app.post("/public/contracts/:token/accept", async (req, res) => {
+  const typed = String(req.body?.fullName ?? "").trim().replace(/\s+/g, " ");
+  if (req.body?.agree !== true) throw new HttpError(400, "Tick the box to agree to the terms");
+  const send = await transaction(async (client) => {
+    const row = await contractByToken(client, String(req.params.token), true);
+    if (!row || row.status === "withdrawn")
+      throw new HttpError(404, "This contract can't be accepted. Ask HR to send it again.");
+    if (row.status === "accepted") throw new HttpError(409, "You've already accepted this contract");
+    if (row.token_expires_at < new Date())
+      throw new HttpError(410, "This link has expired. Ask HR to send your contract again.");
+    const { rows } = await client.query<EmployeeRow>(
+      "SELECT * FROM employees WHERE id = $1 FOR UPDATE",
+      [row.employee_id],
+    );
+    const employee = rows[0];
+    if (typed.toLowerCase() !== employee.name.trim().replace(/\s+/g, " ").toLowerCase())
+      throw new HttpError(400, `Type your full name exactly as it appears: ${employee.name}`);
+    await client.query(
+      `UPDATE contracts SET status = 'accepted', accepted_at = now(), accepted_name = $2,
+         accepted_ip = $3, accepted_user_agent = $4
+       WHERE id = $1`,
+      [row.id, typed, req.ip ?? null, String(req.header("user-agent") ?? "").slice(0, 300)],
+    );
+    await client.query("INSERT INTO activity_log (actor, summary) VALUES ($1, $2)", [
+      `${employee.name} (contract link)`,
+      `Accepted the "${row.title}" contract`,
+    ]);
+    return employee.password_hash === null ? sendSetupLink(client, employee) : null;
+  });
+  if (send) await send();
+  res.json({ accepted: true, setupEmailSent: send !== null });
+});
+
+app.get("/public/contracts/:token/pdf", async (req, res) => {
+  const row = await contractByToken(db, String(req.params.token));
+  if (!row || row.status !== "accepted") throw new HttpError(404, "No accepted contract here");
+  await sendContractPdf(res, row);
+});
+
+const employeeBySetupToken = async (client: PoolClient | typeof db, token: string) =>
+  (
+    await client.query<EmployeeRow>(
+      `SELECT * FROM employees WHERE setup_token_hash = $1 AND setup_token_expires_at > now()
+         AND deactivated_at IS NULL AND (end_date IS NULL OR end_date >= $2)`,
+      [hashToken(token), today()],
+    )
+  ).rows[0];
+
+app.get("/public/setup/:token", async (req, res) => {
+  const employee = await employeeBySetupToken(db, String(req.params.token));
+  if (!employee)
+    throw new HttpError(404, "This link has expired or was already used. Ask HR for a new one.");
+  res.json({ name: employee.name, workEmail: employee.email, company: COMPANY_NAME });
+});
+
+// They choose their own password, so there is no temporary one to change.
+app.post("/public/setup/:token", async (req, res) => {
+  const password = String(req.body?.password ?? "");
+  checkPassword(password);
+  const employee = await transaction(async (client) => {
+    const employee = await employeeBySetupToken(client, String(req.params.token));
+    if (!employee)
+      throw new HttpError(404, "This link has expired or was already used. Ask HR for a new one.");
+    const { salt, hash } = hashPassword(password);
+    await client.query(
+      `UPDATE employees SET salt = $2, password_hash = $3, must_change_password = false,
+         sessions_valid_after = $4, setup_token_hash = NULL, setup_token_expires_at = NULL
+       WHERE id = $1`,
+      [employee.id, salt, hash, new Date()],
+    );
+    await client.query("INSERT INTO activity_log (actor, summary) VALUES ($1, $2)", [
+      `${employee.name} (set-up link)`,
+      "Set up their staff portal account",
+    ]);
+    return employee;
+  });
+  res.json({ workEmail: employee.email });
+});
+
+// --- Emails sent (HR) ---
+
+app.get("/emails", adminOnly, async (_req, res) => {
+  const { rows } = await db.query<{
+    id: string;
+    to_address: string;
+    subject: string;
+    body: string;
+    status: OutboxEmail["status"];
+    error: string | null;
+    created_at: Date;
+  }>("SELECT * FROM email_outbox ORDER BY created_at DESC LIMIT 200");
+  const emails: OutboxEmail[] = rows.map((r) => ({
+    id: String(r.id),
+    to: r.to_address,
+    subject: r.subject,
+    body: r.body,
+    status: r.status,
+    ...(r.error !== null ? { error: r.error } : {}),
+    createdAt: r.created_at.toISOString(),
+  }));
+  res.json(emails);
+});
+
 // --- Requests to HR --------------------------------------------------------
 
 type RequestRow = {
@@ -2514,11 +3079,15 @@ app.get("/backup", adminOnly, async (_req, res) => {
     "announcements",
     "employee_photos",
     "staff_requests",
+    "contract_templates",
+    "contracts",
+    "email_outbox",
   ];
   const data: Record<string, unknown[]> = {};
   for (const table of tables) {
     const { rows } = await db.query(`SELECT * FROM ${table}`);
-    data[table] = rows.map(({ salt: _salt, password_hash: _hash, ...rest }) =>
+    data[table] = rows.map(
+      ({ salt: _salt, password_hash: _hash, token_hash: _t, setup_token_hash: _s, ...rest }) =>
       // Photos as base64 text, rather than JSON's list-of-bytes form.
       Object.fromEntries(
         Object.entries(rest).map(([k, v]) => [k, Buffer.isBuffer(v) ? v.toString("base64") : v]),

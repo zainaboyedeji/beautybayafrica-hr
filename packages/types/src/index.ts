@@ -53,6 +53,12 @@ export interface Employee {
   photoVersion?: string;
   dateOfBirth?: Day;
   homeAddress?: string;
+  /** Where their contract and account set-up emails go. */
+  personalEmail?: string;
+  /** Their latest contract's progress, if one has been sent. */
+  contractStatus?: ContractStatus;
+  /** True while an unused link to set up their account is out. */
+  setupPending: boolean;
   /** Who to call in an emergency. */
   emergencyName?: string;
   emergencyRelationship?: string;
@@ -254,6 +260,57 @@ export interface StaffRequest {
   response?: string;
   resolvedBy?: string;
   resolvedAt?: string;
+  createdAt: string;
+}
+
+export type ContractStatus = "sent" | "viewed" | "accepted" | "withdrawn";
+
+/** HR's contract wording, with {{blanks}} filled in for each person. */
+export interface ContractTemplate {
+  id: string;
+  name: string;
+  body: string;
+  updatedAt: string;
+}
+
+/** A contract sent to one employee, with how they accepted it. */
+export interface Contract {
+  id: string;
+  employeeId: string;
+  templateName?: string;
+  title: string;
+  body: string;
+  status: ContractStatus;
+  sentBy: string;
+  sentAt: string;
+  viewedAt?: string;
+  /** The link in the email stops working after this. */
+  expiresAt: string;
+  acceptedAt?: string;
+  acceptedName?: string;
+  acceptedIp?: string;
+}
+
+/** A contract as its recipient sees it through the emailed link. */
+export interface PublicContract {
+  company: string;
+  employeeName: string;
+  title: string;
+  body: string;
+  status: ContractStatus;
+  expired: boolean;
+  acceptedAt?: string;
+  acceptedName?: string;
+}
+
+/** An email the app sent, or would have sent before email was set up. */
+export interface OutboxEmail {
+  id: string;
+  to: string;
+  subject: string;
+  body: string;
+  status: "sent" | "failed" | "not_sent";
+  error?: string;
   createdAt: string;
 }
 

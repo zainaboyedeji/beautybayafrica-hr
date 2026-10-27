@@ -1,7 +1,14 @@
 "use client";
 
-import { useEffect, useState, type ChangeEvent } from "react";
-import type { Employee, EmploymentType, PayeMode, PayItem, PayItemKind } from "@hr/types";
+import { useCallback, useEffect, useState, type ChangeEvent } from "react";
+import type {
+  ContractStatus,
+  Employee,
+  EmploymentType,
+  PayeMode,
+  PayItem,
+  PayItemKind,
+} from "@hr/types";
 import { COMPANY_EMAIL_DOMAIN } from "@hr/types";
 import ConfirmDialog from "../../components/confirm-dialog";
 import PhotoPicker from "../../components/photo-picker";
@@ -22,6 +29,9 @@ import SearchBox, { matches, NoMatches } from "../../components/search-box";
 import {
   apiSend,
   describeError,
+  downloadFile,
+  fetchContractTemplates,
+  fetchContracts,
   fetchDepartments,
   fetchEmployees,
   fetchPayItems,
@@ -39,6 +49,7 @@ const hasLeft = (e: Employee) => !!e.endDate && e.endDate < today();
 type Dialog =
   | { kind: "edit"; employee: Employee | null }
   | { kind: "login"; employee: Employee }
+  | { kind: "contract"; employee: Employee }
   | { kind: "guarantors"; employee: Employee }
   | { kind: "active"; employee: Employee }
   | { kind: "delete"; employee: Employee };
@@ -141,6 +152,14 @@ export default function EmployeesPage() {
       {dialog?.kind === "login" && (
         <Modal title={`Staff portal · ${dialog.employee.name}`} onClose={close}>
           <LoginForm employee={dialog.employee} onCancel={close} onSaved={saved} />
+        </Modal>
+      )}
+      {dialog?.kind === "contract" && (
+        <Modal wide title={`Contract · ${dialog.employee.name}`} onClose={closeAndReload}>
+          <ContractPanel
+            employee={employees.data?.find((x) => x.id === dialog.employee.id) ?? dialog.employee}
+            onChanged={() => void employees.reload()}
+          />
         </Modal>
       )}
       {dialog?.kind === "guarantors" && (
@@ -284,6 +303,20 @@ export default function EmployeesPage() {
                         Edit
                       </button>
                       <button
+                        onClick={() => setDialog({ kind: "contract", employee: e })}
+                        className="font-medium text-brand-deep hover:underline"
+                        title={e.contractStatus ? CONTRACT_STATUS[e.contractStatus].label : "No contract sent yet"}
+                      >
+                        Contract
+                        {e.contractStatus && (
+                          <span
+                            className={`ml-1 rounded-full px-1.5 py-0.5 text-xs ${CONTRACT_STATUS[e.contractStatus].tint}`}
+                          >
+                            {e.contractStatus === "accepted" ? "✓" : "…"}
+                          </span>
+                        )}
+                      </button>
+                      <button
                         onClick={() => setDialog({ kind: "guarantors", employee: e })}
                         className="font-medium text-brand-deep hover:underline"
                         title={`${e.verifiedGuarantors} of ${e.guarantors} verified`}
@@ -396,8 +429,15 @@ function EmployeeForm({
     emergencyName: employee?.emergencyName ?? "",
     emergencyRelationship: employee?.emergencyRelationship ?? "",
     emergencyPhone: employee?.emergencyPhone ?? "",
+    personalEmail: employee?.personalEmail ?? "",
     password: "",
   });
+  // A new starter's contract can be emailed as soon as they are added.
+  const templates = useLoad(fetchContractTemplates);
+  const [sendContract, setSendContract] = useState(true);
+  const [templateId, setTemplateId] = useState("");
+  const chosenTemplate = templateId || templates.data?.[0]?.id || "";
+  const emailingContract = !employee && sendContract && !!chosenTemplate;
   // The photo is saved straight away, so it shows the latest version.
   const [photoVersion, setPhotoVersion] = useState(employee?.photoVersion);
   const [nhf, setNhf] = useState(employee?.nhf ?? false);
@@ -441,10 +481,15 @@ function EmployeeForm({
           nhf,
           // Left out while still loading, so the saved lines stay as they are.
           ...(items ? { items: items.map((i) => ({ ...i, amount: Number(i.amount) })) } : {}),
+          ...(emailingContract ? { contractTemplateId: chosenTemplate, password: "" } : {}),
         },
         "Could not save employee",
       );
-      onSaved(`${saved.name} saved.`);
+      onSaved(
+        emailingContract
+          ? `${saved.name} added. Their contract was emailed to ${saved.personalEmail}; once they accept, they get a second email to set up their account. (See Settings → Emails sent.)`
+          : `${saved.name} saved.`,
+      );
     } catch (e) {
       setError(describeError(e, "Could not save employee"));
       setSaving(false);
@@ -476,14 +521,24 @@ function EmployeeForm({
           <input required {...field("name")} />
         </label>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 sm:grid-cols-3">
         <label className="text-sm font-medium">
-          Work email <span className="font-normal text-muted">(@{COMPANY_EMAIL_DOMAIN} only)</span>
+          Work email <span className="font-normal text-muted">(@{COMPANY_EMAIL_DOMAIN})</span>
           <input
             required
             type="email"
             placeholder={`name@${COMPANY_EMAIL_DOMAIN}`}
             {...field("email")}
+          />
+        </label>
+        <label className="text-sm font-medium">
+          Personal email{" "}
+          <span className="font-normal text-muted">(contract and set-up go here)</span>
+          <input
+            required={emailingContract}
+            type="email"
+            placeholder="e.g. name@gmail.com"
+            {...field("personalEmail")}
           />
         </label>
         <label className="text-sm font-medium">
@@ -649,13 +704,50 @@ function EmployeeForm({
         </label>
       </div>
       {!employee && (
-        <label className="text-sm font-medium">
-          Temporary staff portal password{" "}
-          <span className="font-normal text-muted">
-            (optional, at least 8 characters; they choose their own when they first log in)
-          </span>
-          <input type="text" autoComplete="new-password" {...field("password")} />
-        </label>
+        <div className="mt-2 rounded-3xl bg-surface-alt/70 p-4 ring-1 ring-line">
+          <label className="flex items-center gap-2 text-sm font-semibold">
+            <input
+              type="checkbox"
+              checked={sendContract}
+              disabled={!templates.data?.length}
+              onChange={(e) => setSendContract(e.target.checked)}
+              className="h-4 w-4 accent-brand-deep"
+            />
+            Email their contract now
+          </label>
+          {templates.data && templates.data.length === 0 ? (
+            <p className="mt-2 text-sm text-muted">
+              Add a contract template under Settings to email contracts.
+            </p>
+          ) : sendContract ? (
+            <div className="mt-3 flex flex-col gap-2">
+              <label className="text-sm font-medium">
+                Contract
+                <select value={chosenTemplate} onChange={(e) => setTemplateId(e.target.value)} className={INPUT}>
+                  {(templates.data ?? []).map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="text-xs text-muted">
+                They get it at their personal email with a link to read and accept it. Once they
+                accept, a second email shows them how to set up their HR account and choose their
+                password.
+              </p>
+            </div>
+          ) : null}
+          {!emailingContract && (
+            <label className="mt-3 block text-sm font-medium">
+              Or a temporary staff portal password{" "}
+              <span className="font-normal text-muted">
+                (optional; tell them in person and they choose their own when they first log in)
+              </span>
+              <input type="text" autoComplete="new-password" {...field("password")} />
+            </label>
+          )}
+        </div>
       )}
       {error && <p className="text-sm text-red-700">{error}</p>}
       <div className="mt-2 flex justify-end gap-3">
@@ -917,5 +1009,247 @@ function LoginForm({ employee, onSaved, onCancel }: FormProps) {
         </button>
       </div>
     </form>
+  );
+}
+
+const CONTRACT_STATUS: Record<ContractStatus, { label: string; tint: string }> = {
+  sent: { label: "Contract sent", tint: "bg-sky-100 text-sky-800" },
+  viewed: { label: "Contract opened", tint: "bg-amber-100 text-amber-800" },
+  accepted: { label: "Contract accepted", tint: "bg-emerald-100 text-emerald-800" },
+  withdrawn: { label: "Withdrawn", tint: "bg-surface-alt text-muted" },
+};
+
+const when = (iso: string) =>
+  new Date(iso).toLocaleString("en-NG", { dateStyle: "medium", timeStyle: "short" });
+
+/** An employee's contracts: progress, resending, and sending a new one. */
+function ContractPanel({ employee, onChanged }: { employee: Employee; onChanged: () => void }) {
+  const loader = useCallback(() => fetchContracts(employee.id), [employee.id]);
+  const contracts = useLoad(loader);
+  const templates = useLoad(fetchContractTemplates);
+  const [templateId, setTemplateId] = useState("");
+  const [draft, setDraft] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const chosen = templateId || templates.data?.[0]?.id || "";
+  const latest = contracts.data?.find((c) => c.status !== "withdrawn");
+  const waiting = latest && latest.status !== "accepted";
+
+  const act = async (work: () => Promise<unknown>, done: string, fallback: string) => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await work();
+      setNotice(done);
+      await contracts.reload();
+      onChanged();
+    } catch (e) {
+      setError(describeError(e, fallback));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const preview = () =>
+    act(
+      async () => {
+        const answer = await apiSend<{ body: string }>(
+          `/employees/${employee.id}/contract-preview`,
+          "POST",
+          { templateId: chosen },
+          "Could not prepare the contract",
+        );
+        setDraft(answer.body);
+      },
+      "Here's their contract. Change anything for them only, then send it.",
+      "Could not prepare the contract",
+    );
+
+  if (!employee.personalEmail)
+    return (
+      <p className="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-800 ring-1 ring-amber-200">
+        Add {employee.name.split(" ")[0]}&apos;s personal email (Edit) first: their contract and
+        account set-up are emailed there.
+      </p>
+    );
+
+  return (
+    <div className="flex flex-col gap-5 text-sm">
+      <p className="text-muted">
+        Emails go to <span className="font-medium text-ink">{employee.personalEmail}</span>.
+      </p>
+      {notice && <p className="rounded-2xl bg-emerald-50 px-4 py-3 text-emerald-800 ring-1 ring-emerald-200">{notice}</p>}
+      {error && <p className="text-red-700">{error}</p>}
+
+      {contracts.failed ? (
+        <LoadError />
+      ) : !contracts.data ? (
+        <Loading />
+      ) : latest ? (
+        <section className="rounded-3xl p-4 ring-1 ring-line">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="font-semibold">{latest.title}</p>
+            <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${CONTRACT_STATUS[latest.status].tint}`}>
+              {CONTRACT_STATUS[latest.status].label}
+            </span>
+          </div>
+          <ul className="mt-2 flex flex-col gap-0.5 text-muted">
+            <li>Sent {when(latest.sentAt)} by {latest.sentBy}</li>
+            {latest.viewedAt && <li>Opened {when(latest.viewedAt)}</li>}
+            {latest.acceptedAt ? (
+              <li className="text-emerald-800">
+                Accepted {when(latest.acceptedAt)}, signed &quot;{latest.acceptedName}&quot;
+                {latest.acceptedIp && ` from ${latest.acceptedIp}`}
+              </li>
+            ) : (
+              <li>Link works until {when(latest.expiresAt)}</li>
+            )}
+          </ul>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              disabled={busy}
+              onClick={() =>
+                void act(
+                  () => downloadFile(`/contracts/${latest.id}/pdf`, `Contract ${employee.name}.pdf`, "Could not download it"),
+                  "Contract downloaded.",
+                  "Could not download it",
+                )
+              }
+              className={SECONDARY_BUTTON}
+            >
+              <Icon name="download" className="h-4 w-4" />
+              PDF
+            </button>
+            {waiting && (
+              <>
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    void act(
+                      () => apiSend(`/contracts/${latest.id}/resend`, "POST", {}, "Could not resend it"),
+                      `Contract emailed again to ${employee.personalEmail} with a new link.`,
+                      "Could not resend it",
+                    )
+                  }
+                  className={SECONDARY_BUTTON}
+                >
+                  <Icon name="refresh" className="h-4 w-4" />
+                  Resend
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    void act(
+                      () => apiSend(`/contracts/${latest.id}/withdraw`, "PUT", {}, "Could not withdraw it"),
+                      "Contract withdrawn. Its link no longer works.",
+                      "Could not withdraw it",
+                    )
+                  }
+                  className={`${SECONDARY_BUTTON} text-red-700`}
+                >
+                  Withdraw
+                </button>
+              </>
+            )}
+          </div>
+        </section>
+      ) : (
+        <p className="text-muted">No contract sent yet.</p>
+      )}
+
+      {!employee.canLogIn && (
+        <section className="rounded-3xl bg-surface-alt/70 p-4 ring-1 ring-line">
+          <p className="font-semibold">HR account</p>
+          <p className="mt-1 text-muted">
+            {employee.setupPending
+              ? "They have a set-up link and haven't used it yet."
+              : latest?.status === "accepted"
+                ? "Their set-up link has expired or wasn't sent."
+                : "The set-up email is sent automatically once they accept their contract."}
+          </p>
+          <button
+            disabled={busy}
+            onClick={() =>
+              void act(
+                () => apiSend(`/employees/${employee.id}/setup-email`, "POST", {}, "Could not send it"),
+                `Set-up email sent to ${employee.personalEmail}.`,
+                "Could not send it",
+              )
+            }
+            className={`${SECONDARY_BUTTON} mt-3`}
+          >
+            {employee.setupPending ? "Send the set-up email again" : "Send the set-up email now"}
+          </button>
+        </section>
+      )}
+
+      <section className="flex flex-col gap-3">
+        <p className="font-semibold">{latest ? "Send a new contract" : "Send their contract"}</p>
+        {templates.data && templates.data.length === 0 ? (
+          <p className="text-muted">Add a contract template under Settings first.</p>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="min-w-56 flex-1 font-medium">
+                Template
+                <select
+                  value={chosen}
+                  onChange={(e) => {
+                    setTemplateId(e.target.value);
+                    setDraft(null);
+                  }}
+                  className={INPUT}
+                >
+                  {(templates.data ?? []).map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button disabled={busy || !chosen} onClick={() => void preview()} className={SECONDARY_BUTTON}>
+                Preview
+              </button>
+            </div>
+            {draft !== null && (
+              <label className="font-medium">
+                Their contract{" "}
+                <span className="font-normal text-muted">(changes here are for {employee.name.split(" ")[0]} only)</span>
+                <textarea
+                  rows={14}
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  className={`${INPUT} font-mono text-sm leading-relaxed`}
+                />
+              </label>
+            )}
+            {waiting && (
+              <p className="text-xs text-muted">Sending a new one withdraws the contract still waiting.</p>
+            )}
+            <button
+              disabled={busy || !chosen}
+              onClick={() =>
+                void act(
+                  () =>
+                    apiSend(
+                      `/employees/${employee.id}/contracts`,
+                      "POST",
+                      { templateId: chosen, ...(draft !== null ? { body: draft } : {}) },
+                      "Could not send the contract",
+                    ).then(() => setDraft(null)),
+                  `Contract emailed to ${employee.personalEmail}.`,
+                  "Could not send the contract",
+                )
+              }
+              className={`${PRIMARY_BUTTON} self-start`}
+            >
+              {busy ? "Sending…" : "Email the contract"}
+            </button>
+          </>
+        )}
+      </section>
+    </div>
   );
 }

@@ -36,6 +36,21 @@ services:
       # The owner's admin login; the password is asked for below.
       - key: ADMIN_EMAIL
         value: hr@beautybayafrica.com
+      # The website's address, for the links in contract and set-up emails.
+      - key: SITE_URL
+        value: https://beautybayafrica-hr.onrender.com
+      # The email account the app sends from (any provider with SMTP). Until
+      # SMTP_HOST is set, emails are kept under Settings → Emails sent.
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: MAIL_FROM
+        sync: false
       # Asked for when the Blueprint is created. Copy the two database values
       # from the repo root's .env.local (written by `neon env pull`).
       - key: DATABASE_URL
@@ -91,6 +106,12 @@ services:
       - type: rewrite
         source: /requests
         destination: /requests.html
+      - type: rewrite
+        source: /contract
+        destination: /contract.html
+      - type: rewrite
+        source: /setup
+        destination: /setup.html
     envVars:
       - key: NODE_VERSION
         value: "24"
