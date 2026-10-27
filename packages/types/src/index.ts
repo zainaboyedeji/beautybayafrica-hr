@@ -311,6 +311,10 @@ export interface OutboxEmail {
   body: string;
   status: "sent" | "failed" | "not_sent";
   error?: string;
+  /** How many times sending has been tried. */
+  attempts: number;
+  /** When a failed email will be tried again; absent once it won't be. */
+  retryAt?: string;
   createdAt: string;
 }
 

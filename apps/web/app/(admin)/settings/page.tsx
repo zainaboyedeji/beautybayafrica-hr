@@ -650,10 +650,20 @@ function EmailsSent() {
                     To {m.to} · {new Date(m.createdAt).toLocaleString("en-NG", { dateStyle: "medium", timeStyle: "short" })}
                   </span>
                 </span>
-                <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${EMAIL_STATUS[m.status].tint}`}>
-                  {EMAIL_STATUS[m.status].label}
+                <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${m.retryAt ? EMAIL_STATUS.not_sent.tint : EMAIL_STATUS[m.status].tint}`}>
+                  {m.retryAt ? "Retrying" : EMAIL_STATUS[m.status].label}
                 </span>
               </button>
+              {(m.retryAt || m.attempts > 1) && (
+                <p className="mt-1 text-xs text-muted">
+                  Tried {m.attempts} time{m.attempts === 1 ? "" : "s"}
+                  {m.retryAt
+                    ? ` · trying again at ${new Date(m.retryAt).toLocaleTimeString("en-NG", { timeStyle: "short" })}`
+                    : m.status === "failed"
+                      ? " · gave up. Send it again from the employee's Contract button."
+                      : ""}
+                </p>
+              )}
               {open === m.id && (
                 <div className="mt-3 rounded-2xl bg-surface-alt p-4">
                   {m.error && <p className="mb-2 text-red-700">{m.error}</p>}

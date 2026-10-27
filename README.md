@@ -76,7 +76,9 @@ own password and log in with their work email. HR sees each contract's progress,
 can resend or withdraw it, and downloads the signed copy as a PDF. Emails go out
 through any SMTP account (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`,
 `MAIL_FROM`; links use `SITE_URL`). Until SMTP is set, emails are kept under
-**Settings → Emails sent** so their links can be copied by hand.
+**Settings → Emails sent** so their links can be copied by hand. An email that
+fails is tried again after 1, 5, 15, 30 and 60 minutes; a newer copy to the same
+person replaces it. On Render's free plan use port 2525, as 587 is blocked.
 
 **Passwords and requests.** A password HR gives (Employees → **Portal**) is
 temporary: the next time the employee logs in, they must choose their own before

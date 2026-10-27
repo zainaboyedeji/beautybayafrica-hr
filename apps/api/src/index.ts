@@ -29,7 +29,7 @@ import {
 import { COMPANY_EMAIL_DOMAIN, isCompanyEmail, salaryReference } from "@hr/types";
 import { payslipPdf } from "./payslip-pdf";
 import { contractPdf } from "./contract-pdf";
-import { sendEmail } from "./mailer";
+import { sendEmail, startRetryingEmails } from "./mailer";
 import express from "express";
 import type { PoolClient } from "pg";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -2715,6 +2715,8 @@ app.get("/emails", adminOnly, async (_req, res) => {
     body: string;
     status: OutboxEmail["status"];
     error: string | null;
+    attempts: number;
+    next_attempt_at: Date | null;
     created_at: Date;
   }>("SELECT * FROM email_outbox ORDER BY created_at DESC LIMIT 200");
   const emails: OutboxEmail[] = rows.map((r) => ({
@@ -2724,6 +2726,8 @@ app.get("/emails", adminOnly, async (_req, res) => {
     body: r.body,
     status: r.status,
     ...(r.error !== null ? { error: r.error } : {}),
+    attempts: r.attempts,
+    ...(r.next_attempt_at ? { retryAt: r.next_attempt_at.toISOString() } : {}),
     createdAt: r.created_at.toISOString(),
   }));
   res.json(emails);
@@ -3137,6 +3141,7 @@ ensureOwner()
   .catch((err) => console.error("Could not set up the owner's login:", err.message))
   .finally(() =>
     app.listen(port, () => {
+      startRetryingEmails();
       console.log(`HR API listening on http://localhost:${port}`);
     }),
   );
