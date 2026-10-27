@@ -29,6 +29,7 @@ import {
 import { COMPANY_EMAIL_DOMAIN, isCompanyEmail, salaryReference } from "@hr/types";
 import { payslipPdf } from "./payslip-pdf";
 import { contractPdf } from "./contract-pdf";
+import { contractEmail, setupEmail } from "./emails";
 import { sendEmail, startRetryingEmails } from "./mailer";
 import express from "express";
 import type { PoolClient } from "pg";
@@ -2299,38 +2300,30 @@ async function fillContract(client: PoolClient | typeof db, employeeId: string, 
   };
 }
 
-const contractEmail = (name: string, link: string) =>
-  [
-    `Dear ${name.split(/\s+/)[0]},`,
-    "",
-    `Welcome to ${COMPANY_NAME}! Your employment contract is ready for you to read and accept:`,
-    "",
-    link,
-    "",
-    `The link works for ${CONTRACT_LINK_DAYS} days. Once you accept, you'll get a second email showing you how to set up your ${COMPANY_NAME} HR account, where you'll see your payslips and ask for leave.`,
-    "",
-    "If you have any questions about the contract, reply to this email or speak to HR.",
-    "",
-    `${COMPANY_NAME} HR`,
-  ].join("\n");
+/** A link's last day, as staff read it in an email. */
+const lastDay = (days: number) =>
+  daysFromNow(days).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: process.env.TIME_ZONE ?? "Africa/Lagos",
+  });
 
-const setupEmail = (name: string, workEmail: string, link: string) =>
-  [
-    `Dear ${name.split(/\s+/)[0]},`,
-    "",
-    `Thank you for accepting your contract. Now set up your ${COMPANY_NAME} HR account:`,
-    "",
-    `1. Open this link and choose your own password (it works for ${SETUP_LINK_DAYS} days):`,
-    `   ${link}`,
-    `2. Then log in at ${SITE_URL}/login on the Employee tab, with your work email:`,
-    `   ${workEmail}`,
-    "",
-    "In the HR account you can see your payslips, check your leave and ask for time off, keep your details up to date, and send HR requests.",
-    "",
-    "Keep your password to yourself. If you ever forget it, use \"Forgotten your password?\" on the login page.",
-    "",
-    `${COMPANY_NAME} HR`,
-  ].join("\n");
+const contractMail = (
+  employee: { name: string; job_title: string; department_name: string | null; start_date: Day },
+  token: string,
+) =>
+  contractEmail({
+    company: COMPANY_NAME,
+    siteUrl: SITE_URL,
+    name: employee.name,
+    jobTitle: employee.job_title,
+    department: employee.department_name,
+    startDate: dayName(employee.start_date),
+    link: `${SITE_URL}/contract?t=${token}`,
+    linkDays: CONTRACT_LINK_DAYS,
+    expires: lastDay(CONTRACT_LINK_DAYS),
+  });
 
 /**
  * Makes a contract for an employee from a template (or wording HR edited),
@@ -2383,7 +2376,7 @@ async function sendContract(
   await sendEmail({
     to: employee.personal_email!,
     subject: `Your employment contract from ${COMPANY_NAME}`,
-    text: contractEmail(employee.name, `${SITE_URL}/contract?t=${token}`),
+    ...contractMail(employee, token),
     employeeId,
   });
   return contract;
@@ -2404,7 +2397,15 @@ async function sendSetupLink(
     sendEmail({
       to: employee.personal_email!,
       subject: `Set up your ${COMPANY_NAME} HR account`,
-      text: setupEmail(employee.name, employee.email, `${SITE_URL}/setup?t=${token}`),
+      ...setupEmail({
+        company: COMPANY_NAME,
+        siteUrl: SITE_URL,
+        name: employee.name,
+        workEmail: employee.email,
+        link: `${SITE_URL}/setup?t=${token}`,
+        linkDays: SETUP_LINK_DAYS,
+        expires: lastDay(SETUP_LINK_DAYS),
+      }),
       employeeId: employee.id,
     });
 }
@@ -2514,7 +2515,7 @@ app.post("/contracts/:id/resend", adminOnly, async (req, res) => {
   await sendEmail({
     to: employee.personal_email!,
     subject: `Your employment contract from ${COMPANY_NAME}`,
-    text: contractEmail(employee.name, `${SITE_URL}/contract?t=${token}`),
+    ...contractMail(employee, token),
     employeeId: employee.id,
   });
   res.json(toContract(row));

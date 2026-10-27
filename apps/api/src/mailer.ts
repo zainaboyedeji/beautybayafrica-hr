@@ -31,10 +31,10 @@ export type EmailStatus = "sent" | "failed" | "not_sent";
 // all, over about two hours.
 const RETRY_MINUTES = [1, 5, 15, 30, 60];
 
-async function deliver(to: string, subject: string, text: string) {
+async function deliver(to: string, subject: string, text: string, html: string | null) {
   if (!transport || !FROM) return { status: "not_sent" as EmailStatus, error: null };
   try {
-    await transport.sendMail({ from: FROM, to, subject, text });
+    await transport.sendMail({ from: FROM, to, subject, text, ...(html ? { html } : {}) });
     return { status: "sent" as EmailStatus, error: null };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
@@ -57,9 +57,12 @@ export async function sendEmail(email: {
   to: string;
   subject: string;
   text: string;
+  /** A designed version; the text is still sent alongside it. */
+  html?: string;
   employeeId?: string;
 }): Promise<EmailStatus> {
-  const { status, error } = await deliver(email.to, email.subject, email.text);
+  const html = email.html ?? null;
+  const { status, error } = await deliver(email.to, email.subject, email.text, html);
   // A newer copy replaces any older one still waiting to be retried, so
   // nobody is sent a link that no longer works.
   await db.query(
@@ -68,21 +71,28 @@ export async function sendEmail(email: {
     [email.to, email.subject],
   );
   await db.query(
-    `INSERT INTO email_outbox (to_address, subject, body, status, error, employee_id, next_attempt_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [email.to, email.subject, email.text, status, error, email.employeeId ?? null, nextTry(status, 1)],
+    `INSERT INTO email_outbox (to_address, subject, body, html, status, error, employee_id, next_attempt_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [email.to, email.subject, email.text, html, status, error, email.employeeId ?? null, nextTry(status, 1)],
   );
   return status;
 }
 
 /** Tries again every failed email that's due. */
 export async function retryFailedEmails() {
-  const { rows } = await db.query<{ id: string; to_address: string; subject: string; body: string; attempts: number }>(
-    `SELECT id, to_address, subject, body, attempts FROM email_outbox
+  const { rows } = await db.query<{
+    id: string;
+    to_address: string;
+    subject: string;
+    body: string;
+    html: string | null;
+    attempts: number;
+  }>(
+    `SELECT id, to_address, subject, body, html, attempts FROM email_outbox
      WHERE next_attempt_at <= now() ORDER BY next_attempt_at LIMIT 20`,
   );
   for (const row of rows) {
-    const { status, error } = await deliver(row.to_address, row.subject, row.body);
+    const { status, error } = await deliver(row.to_address, row.subject, row.body, row.html);
     const attempts = row.attempts + 1;
     await db.query(
       `UPDATE email_outbox SET status = $2, error = $3, attempts = $4, next_attempt_at = $5
