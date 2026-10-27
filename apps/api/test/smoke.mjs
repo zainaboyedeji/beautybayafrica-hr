@@ -4,15 +4,18 @@
 //
 //   1. Make a branch in Neon and copy its connection string.
 //   2. cd apps/api && DATABASE_URL=<branch> npx tsx src/migrate.ts
-//   3. DATABASE_URL=<branch> ADMIN_PASSWORD=test-owner-pass PORT=4199 npx tsx src/index.ts
-//   4. In another terminal: ADMIN_PASSWORD=test-owner-pass pnpm --filter api test
+//   3. DATABASE_URL=<branch> ADMIN_EMAIL=owner@beautybayafrica.com
+//      ADMIN_PASSWORD=test-owner-pass PORT=4199 npx tsx src/index.ts
+//   4. In another terminal: ADMIN_EMAIL=owner@beautybayafrica.com
+//      ADMIN_PASSWORD=test-owner-pass pnpm --filter api test
 //   5. Delete the branch.
 const BASE = process.env.BASE ?? "http://localhost:4199";
-if (!process.env.ADMIN_PASSWORD) {
-  console.error("Set ADMIN_PASSWORD to the test API's owner password.");
+if (!process.env.ADMIN_PASSWORD || !process.env.ADMIN_EMAIL) {
+  console.error("Set ADMIN_EMAIL and ADMIN_PASSWORD to the test API's owner login.");
   process.exit(1);
 }
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 let pass = 0, fail = 0;
 const failures = [];
 
@@ -44,7 +47,9 @@ expectStatus("GET /health", await call("GET", "/health"), 200);
 expectStatus("no token", await call("GET", "/employees"), 401);
 expectStatus("bad token", await call("GET", "/employees", { token: "abc.def" }), 401);
 expectStatus("wrong admin password", await call("POST", "/auth/login", { body: { password: "nope" } }), 401);
-const adminLogin = await call("POST", "/auth/login", { body: { password: ADMIN_PASSWORD } });
+expectStatus("password alone no longer logs in", await call("POST", "/auth/login", { body: { password: ADMIN_PASSWORD } }), 401);
+expectStatus("owner email on the employee tab fails", await call("POST", "/auth/login", { body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD } }), 401);
+const adminLogin = await call("POST", "/auth/login", { body: { role: "admin", email: ADMIN_EMAIL.toUpperCase(), password: ADMIN_PASSWORD } });
 expectStatus("admin login", adminLogin, 200);
 check("owner logs in as Owner", adminLogin.body.name === "Owner", adminLogin.body);
 const A = adminLogin.body.token;
@@ -59,7 +64,7 @@ expectStatus("rename", await call("PUT", `/departments/${dep.body.id}`, { token:
 expectStatus("rename missing", await call("PUT", `/departments/nope`, { token: A, body: { name: "x" } }), 404);
 
 console.log("Employees");
-const e1Email = `ada.${tag}@example.com`;
+const e1Email = `ada.${tag}@beautybayafrica.com`;
 const e1Form = {
   employeeNo: `T1-${tag}`, name: "Ada Test", email: e1Email.toUpperCase(), jobTitle: "Cashier",
   departmentId: dep.body.id, employmentType: "full_time", startDate: "2026-01-05",
@@ -74,15 +79,17 @@ check("canLogIn true", e1.body.canLogIn === true);
 check("department name joined", e1.body.departmentName === `Retail ${tag}`, e1.body.departmentName);
 const E1 = e1.body.id;
 expectStatus("bad email", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "x", email: "nope" } }), 400);
+expectStatus("non-company email refused", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "x", email: `ada.${tag}@gmail.com` } }), 400);
+expectStatus("look-alike domain refused", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "x", email: `ada.${tag}@beautybayafrica.com.ng` } }), 400);
 expectStatus("duplicate email", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: `T9-${tag}` } }), 409);
-expectStatus("duplicate staff no", await call("POST", "/employees", { token: A, body: { ...e1Form, email: `z.${tag}@example.com` } }), 409);
-expectStatus("short password", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "y", email: `y.${tag}@example.com`, password: "short" } }), 400);
-expectStatus("end before start", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "w", email: `w.${tag}@example.com`, endDate: "2025-01-01" } }), 400);
-expectStatus("bad dept id", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "v", email: `v.${tag}@example.com`, departmentId: "missing" } }), 400);
+expectStatus("duplicate staff no", await call("POST", "/employees", { token: A, body: { ...e1Form, email: `z.${tag}@beautybayafrica.com` } }), 409);
+expectStatus("short password", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "y", email: `y.${tag}@beautybayafrica.com`, password: "short" } }), 400);
+expectStatus("end before start", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "w", email: `w.${tag}@beautybayafrica.com`, endDate: "2025-01-01" } }), 400);
+expectStatus("bad dept id", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "v", email: `v.${tag}@beautybayafrica.com`, departmentId: "missing" } }), 400);
 
 // Joins mid-September, so September pay is pro-rated.
 const e2 = await call("POST", "/employees", { token: A, body: {
-  employeeNo: `T2-${tag}`, name: "Bayo Test", email: `bayo.${tag}@example.com`, jobTitle: "Driver",
+  employeeNo: `T2-${tag}`, name: "Bayo Test", email: `bayo.${tag}@beautybayafrica.com`, jobTitle: "Driver",
   startDate: "2026-09-15", baseSalary: 220000, bankName: "=HYPERLINK(\"x\")", bankAccountNumber: "999",
   bankAccountName: "Bayo, Test",
 } });
@@ -90,14 +97,14 @@ expectStatus("create second employee", e2, 201);
 check("no password → canLogIn false", e2.body.canLogIn === false);
 const E2 = e2.body.id;
 check("new employee defaults: no pension, no PAYE", e2.body.pensionPercent === 0 && e2.body.paye === "none", e2.body);
-expectStatus("bad PAYE mode", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "u", email: `u.${tag}@example.com`, paye: "lots" } }), 400);
-expectStatus("fixed PAYE without amount", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "u", email: `u.${tag}@example.com`, paye: "fixed" } }), 400);
-expectStatus("pension over 100%", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "u", email: `u.${tag}@example.com`, pensionPercent: 150 } }), 400);
-expectStatus("bad pay line rolls back create", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: `T5-${tag}`, email: `t5.${tag}@example.com`, items: [{ kind: "allowance", name: "X", amount: -5 }] } }), 400);
+expectStatus("bad PAYE mode", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "u", email: `u.${tag}@beautybayafrica.com`, paye: "lots" } }), 400);
+expectStatus("fixed PAYE without amount", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "u", email: `u.${tag}@beautybayafrica.com`, paye: "fixed" } }), 400);
+expectStatus("pension over 100%", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: "u", email: `u.${tag}@beautybayafrica.com`, pensionPercent: 150 } }), 400);
+expectStatus("bad pay line rolls back create", await call("POST", "/employees", { token: A, body: { ...e1Form, employeeNo: `T5-${tag}`, email: `t5.${tag}@beautybayafrica.com`, items: [{ kind: "allowance", name: "X", amount: -5 }] } }), 400);
 check("…and no employee was created", !(await call("GET", "/employees", { token: A })).body.some((e) => e.employeeNo === `T5-${tag}`));
 // Fixed PAYE, set up in one go with its pay lines, joining mid-September.
 const e4 = await call("POST", "/employees", { token: A, body: {
-  employeeNo: `T4-${tag}`, name: "Chi Test", email: `chi.${tag}@example.com`, jobTitle: "Stylist",
+  employeeNo: `T4-${tag}`, name: "Chi Test", email: `chi.${tag}@beautybayafrica.com`, jobTitle: "Stylist",
   startDate: "2026-09-15", baseSalary: 200000, paye: "fixed", payeAmount: 11000, pensionPercent: 0,
   items: [{ kind: "allowance", name: "Transport", amount: 20000 }],
 } });
@@ -160,7 +167,7 @@ expectStatus("unknown request type", await call("POST", "/requests", { token: T,
 const letterReq = await call("POST", "/requests", { token: T, body: { type: "letter", details: "Employment letter for my bank" } });
 expectStatus("ask for a letter", letterReq, 201);
 const forgot = await call("POST", "/auth/password-request", { body: { email: e1Email } });
-const forgotUnknown = await call("POST", "/auth/password-request", { body: { email: `nobody.${tag}@example.com` } });
+const forgotUnknown = await call("POST", "/auth/password-request", { body: { email: `nobody.${tag}@beautybayafrica.com` } });
 check("forgot password gives the same answer for any email", forgot.status === 200 && forgotUnknown.status === 200 && forgot.body.message === forgotUnknown.body.message);
 check("no duplicate password request from the login page", (await call("GET", "/requests/mine", { token: T })).body.filter((r) => r.type === "password_reset" && r.status === "open").length === 1);
 expectStatus("employee can't handle requests", await call("PUT", `/requests/${letterReq.body.id}`, { token: T, body: { status: "done" } }), 403);
@@ -241,7 +248,7 @@ expectStatus("employee can't edit notices", await call("PUT", `/announcements/${
 await call("DELETE", `/announcements/${pinnedOne.body.id}`, { token: A });
 expectStatus("empty notice refused", await call("POST", "/announcements", { token: A, body: { title: "x" } }), 400);
 expectStatus("employee can't post notices", await call("POST", "/announcements", { token: T, body: { title: "x", body: "y" } }), 403);
-check("employee sees the notice", (await call("GET", "/announcements", { token: T })).body.some((n) => n.title === `Notice ${tag}` && n.postedBy === "Owner"));
+check("employee sees the notice", (await call("GET", "/announcements", { token: T })).body.some((n) => n.title === `Notice ${tag}` && n.postedBy === "Owner (admin)"));
 expectStatus("take down notice", await call("DELETE", `/announcements/${posted.body.id}`, { token: A }), 204);
 
 console.log("Public holidays");
@@ -427,17 +434,24 @@ T = back.body.token;
 expectStatus("new session works", await call("GET", "/me", { token: T }), 200);
 
 console.log("Admin accounts");
-const adminEmail = `boss.${tag}@example.com`;
+const adminEmail = `boss.${tag}@beautybayafrica.com`;
 expectStatus("add admin", await call("POST", "/admins", { token: A, body: { name: "Bola Admin", email: adminEmail.toUpperCase(), password: "adminpass1" } }), 201);
 expectStatus("duplicate admin email", await call("POST", "/admins", { token: A, body: { name: "x", email: adminEmail, password: "adminpass1" } }), 409);
-expectStatus("short admin password", await call("POST", "/admins", { token: A, body: { name: "x", email: `x.${tag}@example.com`, password: "short" } }), 400);
-expectStatus("employee can't add admins", await call("POST", "/admins", { token: T, body: { name: "x", email: `y.${tag}@example.com`, password: "adminpass1" } }), 403);
+expectStatus("non-company admin email refused", await call("POST", "/admins", { token: A, body: { name: "x", email: `x.${tag}@gmail.com`, password: "adminpass1" } }), 400);
+const adminList = (await call("GET", "/admins", { token: A })).body;
+const owner = adminList.find((a) => a.isOwner);
+check("owner account made from ADMIN_EMAIL", owner?.email === ADMIN_EMAIL.toLowerCase(), adminList);
+expectStatus("owner's password can't be changed from the app", await call("PUT", `/admins/${owner.id}/password`, { token: A, body: { password: "takeover123" } }), 404);
+expectStatus("short admin password", await call("POST", "/admins", { token: A, body: { name: "x", email: `x.${tag}@beautybayafrica.com`, password: "short" } }), 400);
+expectStatus("employee can't add admins", await call("POST", "/admins", { token: T, body: { name: "x", email: `y.${tag}@beautybayafrica.com`, password: "adminpass1" } }), 403);
 expectStatus("admin email on employee tab fails", await call("POST", "/auth/login", { body: { email: adminEmail, password: "adminpass1" } }), 401);
 const bolaLogin = await call("POST", "/auth/login", { body: { role: "admin", email: adminEmail, password: "adminpass1" } });
 expectStatus("admin logs in with email", bolaLogin, 200);
 check("admin session has their name", bolaLogin.body.name === "Bola Admin" && bolaLogin.body.role === "admin", bolaLogin.body);
 let B = bolaLogin.body.token;
 expectStatus("admin token works", await call("GET", "/employees", { token: B }), 200);
+expectStatus("another admin can't deactivate the owner", await call("PUT", `/admins/${owner.id}/active`, { token: B, body: { active: false } }), 404);
+expectStatus("or change the owner's password", await call("PUT", `/admins/${owner.id}/password`, { token: B, body: { password: "takeover123" } }), 404);
 const bolaId = (await call("GET", "/admins", { token: A })).body.find((a) => a.email === adminEmail)?.id;
 expectStatus("can't deactivate yourself", await call("PUT", `/admins/${bolaId}/active`, { token: B, body: { active: false } }), 400);
 expectStatus("Bola adds a department", await call("POST", "/departments", { token: B, body: { name: `Bola dept ${tag}` } }), 201);
@@ -453,7 +467,7 @@ console.log("Activity log and backup");
 const log = await call("GET", "/activity", { token: A });
 expectStatus("activity log", log, 200);
 const said = (re, by) => log.body.some((a) => re.test(a.summary) && (!by || a.actor === by));
-check("logs who added an employee", said(new RegExp(`Added employee Ada Test \\(T1-${tag}\\)`), "Owner"));
+check("logs who added an employee", said(new RegExp(`Added employee Ada Test \\(T1-${tag}\\)`), "Owner (admin)"));
 check("logs a leaving-date change", said(/Updated Ada Test: leaving date/));
 check("logs a completed password request", said(/Completed Ada Test's request for a new password: Ask me for it/));
 check("logs choosing their own password", log.body.some((a) => a.summary === "Chose their own staff portal password" && a.actor === "Ada Test (staff portal)"));
@@ -476,7 +490,7 @@ expectStatus("after an HR reset, only /me works", await call("GET", "/leave/mine
 expectStatus("remove portal access", await call("DELETE", `/employees/${E1}/password`, { token: A }), 204);
 expectStatus("old token rejected", await call("GET", "/me", { token: T }), 401);
 expectStatus("delete E2 (no payslips? has Sep payslip)", await call("DELETE", `/employees/${E2}`, { token: A }), 409);
-const e3 = await call("POST", "/employees", { token: A, body: { employeeNo: `T3-${tag}`, name: "Temp", email: `t3.${tag}@example.com`, jobTitle: "x", startDate: "2026-10-01", baseSalary: 1 } });
+const e3 = await call("POST", "/employees", { token: A, body: { employeeNo: `T3-${tag}`, name: "Temp", email: `t3.${tag}@beautybayafrica.com`, jobTitle: "x", startDate: "2026-10-01", baseSalary: 1 } });
 expectStatus("delete employee without payslips", await call("DELETE", `/employees/${e3.body.id}`, { token: A }), 204);
 expectStatus("delete department", await call("DELETE", `/departments/${dep.body.id}`, { token: A }), 204);
 const after = await call("GET", "/employees", { token: A });

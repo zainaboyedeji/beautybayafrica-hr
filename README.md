@@ -14,14 +14,16 @@ monorepo with an Express 5 + `pg` API on Neon Postgres, and a Next.js 16 site
 
 ```bash
 corepack pnpm install
-cp apps/api/.env.example apps/api/.env   # fill in DATABASE_URL and ADMIN_PASSWORD
+cp apps/api/.env.example apps/api/.env   # fill in DATABASE_URL, ADMIN_EMAIL and ADMIN_PASSWORD
 corepack pnpm --filter api db:migrate
 corepack pnpm dev                        # API on :4100, site on :3100
 ```
 
-Log in at http://localhost:3100/login: **Admin** tab, email left empty, with
-`ADMIN_PASSWORD` (the owner's login). Under **Settings**, give each person who runs
-HR their own admin login, so the **Activity** page shows who did what. Add
+Log in at http://localhost:3100/login: **Admin** tab with `ADMIN_EMAIL` and
+`ADMIN_PASSWORD` (the owner's login, made when the API starts; change them on the
+host to recover it). Under **Settings**, give each person who runs HR their own
+admin login, so the **Activity** page shows who did what. Every staff and admin
+email must end with **@beautybayafrica.com**. Add
 departments and employees, then on an employee's **Portal** button give them a
 password; they log in on the **Employee** tab with their work email.
 
@@ -88,7 +90,8 @@ the steps are at the top of the file. Run it before each deploy.
 ## Deploy (Render + Neon)
 
 Push to GitHub → Render → **New → Blueprint** → pick the repo, then fill in
-`DATABASE_URL`, `DATABASE_URL_UNPOOLED` and `ADMIN_PASSWORD`. The API runs new
+`DATABASE_URL`, `DATABASE_URL_UNPOOLED` and `ADMIN_PASSWORD` (`ADMIN_EMAIL` is set
+in `render.yaml`). The API runs new
 migrations each time it starts. On Render's free plan the API sleeps when no one
 uses it, so the first login after a quiet spell takes up to a minute (the login page
 says so); the paid plan keeps it awake. If the API's address differs from

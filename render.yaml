@@ -33,6 +33,9 @@ services:
         generateValue: true
       - key: TIME_ZONE
         value: Africa/Lagos
+      # The owner's admin login; the password is asked for below.
+      - key: ADMIN_EMAIL
+        value: hr@beautybayafrica.com
       # Asked for when the Blueprint is created. Copy the two database values
       # from the repo root's .env.local (written by `neon env pull`).
       - key: DATABASE_URL

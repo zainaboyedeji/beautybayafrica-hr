@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ChangeEvent } from "react";
 import type { Employee, EmploymentType, PayeMode, PayItem, PayItemKind } from "@hr/types";
+import { COMPANY_EMAIL_DOMAIN } from "@hr/types";
 import ConfirmDialog from "../../components/confirm-dialog";
 import PhotoPicker from "../../components/photo-picker";
 import Guarantors from "../../components/guarantors";
@@ -477,8 +478,13 @@ function EmployeeForm({
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="text-sm font-medium">
-          Work email
-          <input required type="email" {...field("email")} />
+          Work email <span className="font-normal text-muted">(@{COMPANY_EMAIL_DOMAIN} only)</span>
+          <input
+            required
+            type="email"
+            placeholder={`name@${COMPANY_EMAIL_DOMAIN}`}
+            {...field("email")}
+          />
         </label>
         <label className="text-sm font-medium">
           Phone <span className="font-normal text-muted">(optional)</span>

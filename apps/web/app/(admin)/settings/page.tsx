@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { Admin } from "@hr/types";
+import { COMPANY_EMAIL_DOMAIN, type Admin } from "@hr/types";
 import ConfirmDialog from "../../components/confirm-dialog";
 import {
   CARD,
@@ -94,7 +94,7 @@ function Admins({ onNotice }: SectionProps) {
   return (
     <Section
       title="Admins"
-      description="Give each person who runs HR their own login, so the activity log shows who did what. The owner password (ADMIN_PASSWORD) always works too; keep it for emergencies."
+      description={`Give each person who runs HR their own login, so the activity log shows who did what. Admins log in with their @${COMPANY_EMAIL_DOMAIN} email. The owner's login is set on the server (ADMIN_EMAIL and ADMIN_PASSWORD), so it can always be recovered there.`}
     >
       {dialog?.kind === "add" && (
         <Modal title="Add admin" onClose={() => setDialog(null)}>
@@ -129,7 +129,7 @@ function Admins({ onNotice }: SectionProps) {
         <ul className="divide-y divide-line">
           {admins.data.length === 0 && (
             <li className="py-2 text-sm text-muted">
-              No admins yet: only the owner password can log in.
+              No admins yet. Set ADMIN_EMAIL and ADMIN_PASSWORD on the server for the owner.
             </li>
           )}
           {admins.data.map((a) => (
@@ -137,6 +137,11 @@ function Admins({ onNotice }: SectionProps) {
               <div className={a.deactivatedAt ? "text-muted" : ""}>
                 <p className="font-medium">
                   {a.name}
+                  {a.isOwner && (
+                    <span className="ml-2 rounded-full bg-brand-soft px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-brand-deep">
+                      Owner
+                    </span>
+                  )}
                   {session?.name === a.name && <span className="text-muted"> (you)</span>}
                 </p>
                 <p className="text-sm text-muted">
@@ -144,6 +149,9 @@ function Admins({ onNotice }: SectionProps) {
                   {a.deactivatedAt && ` · deactivated ${formatDay(new Date(a.deactivatedAt).toLocaleDateString("en-CA"))}`}
                 </p>
               </div>
+              {a.isOwner ? (
+                <p className="text-xs text-muted">Changed on the server only</p>
+              ) : (
               <div className="flex gap-3 text-sm">
                 <button
                   onClick={() => setDialog({ kind: "password", admin: a })}
@@ -158,6 +166,7 @@ function Admins({ onNotice }: SectionProps) {
                   {a.deactivatedAt ? "Reactivate" : "Deactivate"}
                 </button>
               </div>
+              )}
             </li>
           ))}
         </ul>
@@ -200,8 +209,8 @@ function AdminForm({ onSaved, onCancel }: { onSaved: (m: string) => void; onCanc
         <input autoFocus required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={INPUT} />
       </label>
       <label className="text-sm font-medium">
-        Email <span className="font-normal text-muted">(they log in with it)</span>
-        <input required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className={INPUT} />
+        Email <span className="font-normal text-muted">(@{COMPANY_EMAIL_DOMAIN} only; they log in with it)</span>
+        <input required type="email" placeholder={`name@${COMPANY_EMAIL_DOMAIN}`} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className={INPUT} />
       </label>
       <label className="text-sm font-medium">
         Password <span className="font-normal text-muted">(at least 8 characters)</span>

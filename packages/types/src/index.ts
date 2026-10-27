@@ -210,6 +210,8 @@ export interface Admin {
   id: string;
   name: string;
   email: string;
+  /** The owner's account, made from ADMIN_EMAIL / ADMIN_PASSWORD on the server. */
+  isOwner: boolean;
   deactivatedAt?: string;
   createdAt: string;
 }
@@ -268,6 +270,14 @@ export interface PublicHoliday {
   day: Day;
   name: string;
 }
+
+/** Staff and admin emails must be on the company's own domain. */
+export const COMPANY_EMAIL_DOMAIN = "beautybayafrica.com";
+
+/** True for a well-formed address ending in @beautybayafrica.com. */
+export const isCompanyEmail = (email: string) =>
+  /^[^\s@]+@[^\s@]+$/.test(email) &&
+  email.trim().toLowerCase().endsWith(`@${COMPANY_EMAIL_DOMAIN}`);
 
 /** The reference to put on a salary transfer, e.g. SAL-202610-BBA-001. */
 export const salaryReference = (period: Period, employeeNo: string) =>

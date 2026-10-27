@@ -8,7 +8,6 @@ import {
   employeeOnly,
   employeeOnTemporaryPassword,
   hashPassword,
-  isAdminPassword,
   isLockedOut,
   LOCKOUT_MINUTES,
   MIN_PASSWORD_LENGTH,
@@ -27,7 +26,7 @@ import {
   today,
   weekdaysBetween,
 } from "./payroll";
-import { salaryReference } from "@hr/types";
+import { COMPANY_EMAIL_DOMAIN, isCompanyEmail, salaryReference } from "@hr/types";
 import { payslipPdf } from "./payslip-pdf";
 import express from "express";
 import type { PoolClient } from "pg";
@@ -416,9 +415,7 @@ app.post("/auth/login", async (req, res) => {
   const email = String(req.body?.email ?? "").trim().toLowerCase();
   let session: Omit<Session, "iat" | "exp"> | null = null;
   let mustChangePassword = false;
-  if (!email && password && isAdminPassword(password)) {
-    session = { role: "admin", name: "Owner" };
-  } else if (email && password && req.body?.role === "admin") {
+  if (email && password && req.body?.role === "admin") {
     const { rows } = await db.query<AdminRow>(
       "SELECT * FROM admins WHERE email = $1 AND deactivated_at IS NULL",
       [email],
@@ -444,9 +441,7 @@ app.post("/auth/login", async (req, res) => {
 
   if (!session) {
     recordFailedLogin(key);
-    res
-      .status(401)
-      .json({ error: email ? "Wrong email or password" : "Wrong password" });
+    res.status(401).json({ error: "Wrong email or password" });
     return;
   }
   clearFailedLogins(key);
@@ -595,8 +590,8 @@ const readEmployeeForm = (body: Record<string, unknown> | undefined) => {
   const annualLeaveDays = Number(body?.annualLeaveDays ?? 20);
   if (!employeeNo || !name || !jobTitle)
     throw new HttpError(400, "Staff number, name and job title are required");
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    throw new HttpError(400, "Enter a valid email address");
+  if (!isCompanyEmail(email))
+    throw new HttpError(400, `Use their @${COMPANY_EMAIL_DOMAIN} work email`);
   if (!EMPLOYMENT_TYPES.includes(employmentType as EmploymentType))
     throw new HttpError(400, "Unknown employment type");
   if (!isDay(startDate)) throw new HttpError(400, "Choose the start date");
@@ -2029,6 +2024,7 @@ type AdminRow = {
   password_hash: string;
   sessions_valid_after: Date;
   deactivated_at: Date | null;
+  is_owner: boolean;
   created_at: Date;
 };
 
@@ -2036,13 +2032,71 @@ const toAdmin = (row: AdminRow): Admin => ({
   id: row.id,
   name: row.name,
   email: row.email,
+  isOwner: row.is_owner,
   ...(row.deactivated_at !== null ? { deactivatedAt: row.deactivated_at.toISOString() } : {}),
   createdAt: row.created_at.toISOString(),
 });
 
+const OWNER_OR_MISSING =
+  "Admin not found. (The owner's account is managed with ADMIN_EMAIL and ADMIN_PASSWORD on the server.)";
+
+/**
+ * Makes or updates the owner's admin account from ADMIN_EMAIL and
+ * ADMIN_PASSWORD, so the owner can always get in by changing them on the
+ * host. A changed password ends the owner's other logins.
+ */
+async function ensureOwner() {
+  const email = (process.env.ADMIN_EMAIL ?? "").trim().toLowerCase();
+  const password = process.env.ADMIN_PASSWORD ?? "";
+  if (!email || !password) {
+    console.error("Set ADMIN_EMAIL and ADMIN_PASSWORD to make the owner's admin login.");
+    return;
+  }
+  if (!isCompanyEmail(email) || password.length < MIN_PASSWORD_LENGTH) {
+    console.error(
+      `ADMIN_EMAIL must end with @${COMPANY_EMAIL_DOMAIN}, and ADMIN_PASSWORD needs ` +
+        `${MIN_PASSWORD_LENGTH} or more characters. The owner's login was not updated.`,
+    );
+    return;
+  }
+  await transaction(async (client) => {
+    const { rows } = await client.query<AdminRow>(
+      "SELECT * FROM admins WHERE is_owner OR email = $1 ORDER BY is_owner DESC FOR UPDATE",
+      [email],
+    );
+    const owner = rows.find((r) => r.is_owner);
+    const sameEmailAdmin = rows.find((r) => !r.is_owner && r.email === email);
+    if (owner && sameEmailAdmin)
+      throw new Error(`ADMIN_EMAIL ${email} already belongs to another admin`);
+    const current = owner ?? sameEmailAdmin;
+    if (!current) {
+      const { salt, hash } = hashPassword(password);
+      await client.query(
+        `INSERT INTO admins (id, name, email, salt, password_hash, is_owner)
+         VALUES ($1, 'Owner', $2, $3, $4, true)`,
+        [randomUUID(), email, salt, hash],
+      );
+      return;
+    }
+    const samePassword = passwordMatchesHash(password, current.salt, current.password_hash);
+    if (current.is_owner && current.email === email && samePassword && !current.deactivated_at)
+      return;
+    const { salt, hash } = samePassword
+      ? { salt: current.salt, hash: current.password_hash }
+      : hashPassword(password);
+    await client.query(
+      `UPDATE admins SET is_owner = true, email = $2, salt = $3, password_hash = $4,
+         deactivated_at = NULL,
+         sessions_valid_after = CASE WHEN $5 THEN sessions_valid_after ELSE $6 END
+       WHERE id = $1`,
+      [current.id, email, salt, hash, samePassword, new Date()],
+    );
+  });
+}
+
 app.get("/admins", adminOnly, async (_req, res) => {
   const { rows } = await db.query<AdminRow>(
-    "SELECT * FROM admins ORDER BY deactivated_at IS NOT NULL, name",
+    "SELECT * FROM admins ORDER BY is_owner DESC, deactivated_at IS NOT NULL, name",
   );
   res.json(rows.map(toAdmin));
 });
@@ -2052,8 +2106,8 @@ app.post("/admins", adminOnly, async (req, res) => {
   const email = String(req.body?.email ?? "").trim().toLowerCase();
   const password = String(req.body?.password ?? "");
   if (!name) throw new HttpError(400, "Enter their name");
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    throw new HttpError(400, "Enter a valid email address");
+  if (!isCompanyEmail(email))
+    throw new HttpError(400, `Use their @${COMPANY_EMAIL_DOMAIN} work email`);
   checkPassword(password);
   const { salt, hash } = hashPassword(password);
   const row = await transaction(async (client) => {
@@ -2076,10 +2130,10 @@ app.put("/admins/:id/password", adminOnly, async (req, res) => {
   await transaction(async (client) => {
     const { rows } = await client.query<{ name: string }>(
       `UPDATE admins SET salt = $2, password_hash = $3, sessions_valid_after = $4
-       WHERE id = $1 RETURNING name`,
+       WHERE id = $1 AND NOT is_owner RETURNING name`,
       [req.params.id, salt, hash, new Date()],
     );
-    if (!rows[0]) throw new HttpError(404, "Admin not found");
+    if (!rows[0]) throw new HttpError(404, OWNER_OR_MISSING);
     await logActivity(client, res, `Set a new password for admin ${rows[0].name}`);
   });
   res.sendStatus(204);
@@ -2094,10 +2148,10 @@ app.put("/admins/:id/active", adminOnly, async (req, res) => {
     const { rows } = await client.query<AdminRow>(
       `UPDATE admins SET deactivated_at = CASE WHEN $2 THEN NULL
          ELSE COALESCE(deactivated_at, now()) END
-       WHERE id = $1 RETURNING *`,
+       WHERE id = $1 AND NOT is_owner RETURNING *`,
       [req.params.id, active],
     );
-    if (!rows[0]) throw new HttpError(404, "Admin not found");
+    if (!rows[0]) throw new HttpError(404, OWNER_OR_MISSING);
     await logActivity(
       client,
       res,
@@ -2268,7 +2322,7 @@ app.post("/auth/password-request", async (req, res) => {
   }
   recordFailedLogin(key);
   const email = String(req.body?.email ?? "").trim().toLowerCase();
-  if (email) {
+  if (isCompanyEmail(email)) {
     const { rows } = await db.query<{ id: string; name: string }>(
       `SELECT id, name FROM employees WHERE email = $1 AND deactivated_at IS NULL
          AND (end_date IS NULL OR end_date >= $2)`,
@@ -2508,6 +2562,10 @@ const errorHandler: express.ErrorRequestHandler = (err, _req, res, _next) => {
 };
 app.use(errorHandler);
 
-app.listen(port, () => {
-  console.log(`HR API listening on http://localhost:${port}`);
-});
+ensureOwner()
+  .catch((err) => console.error("Could not set up the owner's login:", err.message))
+  .finally(() =>
+    app.listen(port, () => {
+      console.log(`HR API listening on http://localhost:${port}`);
+    }),
+  );

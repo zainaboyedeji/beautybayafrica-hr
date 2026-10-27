@@ -3,15 +3,15 @@ import { today } from "./payroll";
 import type express from "express";
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
-// Admins log in with their email and password, and the owner with
-// ADMIN_PASSWORD alone; employees log in to the staff portal with their work
-// email and a password the admin gives them.
+// Admins log in with their email and password (the owner's account is made
+// from ADMIN_EMAIL and ADMIN_PASSWORD); employees log in to the staff portal
+// with their work email and a password the admin gives them.
 export type Role = "admin" | "employee";
 export type Session = {
   role: Role;
   name: string;
   employeeId?: string;
-  /** Absent for the owner, who logs in with ADMIN_PASSWORD. */
+  /** Every admin login belongs to an admin account. */
   adminId?: string;
   /** When the login was made, so a password reset can end older ones. */
   iat: number;
@@ -22,16 +22,7 @@ export type Session = {
 
 /** Who did something, for the activity log. */
 export const actorOf = (session: Session) =>
-  session.role === "employee"
-    ? `${session.name} (staff portal)`
-    : session.adminId
-      ? `${session.name} (admin)`
-      : "Owner";
-
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "";
-if (!ADMIN_PASSWORD) {
-  console.error("ADMIN_PASSWORD is not set, so the admin cannot log in.");
-}
+  session.role === "employee" ? `${session.name} (staff portal)` : `${session.name} (admin)`;
 // Without a fixed SESSION_SECRET everyone is logged out when the server restarts.
 const SESSION_SECRET =
   process.env.SESSION_SECRET ?? randomBytes(32).toString("hex");
@@ -48,14 +39,6 @@ export const passwordMatchesHash = (password: string, salt: string, hash: string
   timingSafeEqual(
     scryptSync(password, salt, 32),
     Buffer.from(hash, "hex"),
-  );
-
-// Compares hashes so the check takes the same time whatever was typed.
-export const isAdminPassword = (password: string) =>
-  ADMIN_PASSWORD !== "" &&
-  timingSafeEqual(
-    createHmac("sha256", SESSION_SECRET).update(password).digest(),
-    createHmac("sha256", SESSION_SECRET).update(ADMIN_PASSWORD).digest(),
   );
 
 const sign = (payload: string) =>
@@ -96,7 +79,9 @@ const readToken = async (header: string | undefined): Promise<Session | null> =>
     );
     if (!rows[0]) return null;
     session.mustChangePassword = rows[0].must_change_password;
-  } else if (session.adminId) {
+  } else {
+    // Logins from the old password-only owner login have no admin account.
+    if (!session.adminId) return null;
     const { rowCount } = await db.query(
       `SELECT 1 FROM admins WHERE id = $1 AND deactivated_at IS NULL
          AND sessions_valid_after <= $2`,

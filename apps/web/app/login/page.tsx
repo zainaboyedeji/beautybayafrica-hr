@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { COMPANY_EMAIL_DOMAIN } from "@hr/types";
 import { INPUT, PRIMARY_BUTTON } from "../components/form-styles";
 import { API_URL, describeError } from "../lib/api";
 import { homeOf, saveSession, type Session } from "../lib/auth";
@@ -46,13 +47,8 @@ export default function LoginPage() {
       const res = await fetch(`${API_URL}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // An admin without an email is the owner, with ADMIN_PASSWORD.
         body: JSON.stringify(
-          mode === "admin"
-            ? email.trim()
-              ? { role: "admin", email, password }
-              : { password }
-            : { email, password },
+          mode === "admin" ? { role: "admin", email, password } : { email, password },
         ),
       });
       const body = await res.json();
@@ -124,15 +120,13 @@ export default function LoginPage() {
           </div>
 
           <label className="mt-6 block text-sm font-medium">
-            {isEmployee ? "Work email" : "Email"}{" "}
-            {!isEmployee && (
-              <span className="font-normal text-muted">(leave empty for the owner password)</span>
-            )}
+            Work email
             <input
               autoFocus
-              required={isEmployee}
+              required
               type="email"
               autoComplete="username"
+              placeholder={`name@${COMPANY_EMAIL_DOMAIN}`}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className={`${INPUT} h-12`}
@@ -198,7 +192,7 @@ export default function LoginPage() {
               {forgot ? "← Back to log in" : "Forgotten your password?"}
             </button>
           ) : (
-            "Forgotten your password? Ask another admin, or the owner, to set a new one."
+            "Forgotten your password? Ask another admin to set a new one. The owner's is set on the server (ADMIN_PASSWORD)."
           )}
         </p>
       </div>
