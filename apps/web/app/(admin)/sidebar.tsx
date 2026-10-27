@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Icon, { type IconName } from "../components/icons";
 import { fetchLeave, fetchRequests, useLoad } from "../lib/api";
 import { logOut, useSession } from "../lib/auth";
@@ -36,9 +36,12 @@ export default function Sidebar() {
     "/leave": leave.data?.filter((l) => l.status === "pending").length ?? 0,
     "/requests": requests.data?.filter((r) => r.status === "open").length ?? 0,
   };
+  const waitingTotal = Object.values(waiting).reduce((a, b) => a + b, 0);
+  // On phones and tablets the menu slides in from a button in a top bar.
+  const [open, setOpen] = useState(false);
 
-  return (
-    <aside className="no-print flex w-64 shrink-0 flex-col rounded-3xl bg-white/85 p-4 shadow-soft ring-1 ring-line backdrop-blur">
+  const menu = (
+    <>
       <div className="flex items-center gap-3 px-2 py-2">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/logo.png" alt="" className="h-11 w-11" />
@@ -56,6 +59,7 @@ export default function Sidebar() {
             <Link
               key={link.href}
               href={link.href}
+              onClick={() => setOpen(false)}
               aria-current={active ? "page" : undefined}
               className={`group flex items-center gap-3 rounded-2xl px-2.5 py-2 text-sm font-semibold transition ${
                 active
@@ -98,6 +102,53 @@ export default function Sidebar() {
           Log out
         </button>
       </div>
-    </aside>
+    </>
+  );
+
+  const current = LINKS.find((l) => l.href === pathname)?.label ?? "Menu";
+  return (
+    <>
+      <header className="no-print flex items-center justify-between gap-3 rounded-3xl bg-white/85 py-2 pl-3 pr-2 shadow-soft ring-1 ring-line backdrop-blur lg:hidden">
+        <div className="flex items-center gap-2">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo.png" alt="" className="h-9 w-9" />
+          <span className="font-display text-lg font-semibold">{current}</span>
+        </div>
+        <button
+          onClick={() => setOpen(true)}
+          aria-label="Open menu"
+          aria-expanded={open}
+          className="relative inline-flex items-center gap-2 rounded-full bg-surface-alt px-3.5 py-2 text-sm font-semibold ring-1 ring-line"
+        >
+          <Icon name="menu" className="h-4 w-4" />
+          Menu
+          {waitingTotal > 0 && (
+            <span className="rounded-full bg-brand px-1.5 text-xs font-bold text-ink">{waitingTotal}</span>
+          )}
+        </button>
+      </header>
+      <aside className="no-print hidden w-64 shrink-0 flex-col rounded-3xl bg-white/85 p-4 shadow-soft ring-1 ring-line backdrop-blur lg:flex">
+        {menu}
+      </aside>
+      {open && (
+        <div
+          className="no-print fixed inset-0 z-50 bg-ink/40 backdrop-blur-sm lg:hidden"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setOpen(false);
+          }}
+        >
+          <aside className="flex h-full w-72 max-w-[85%] animate-pop-in flex-col overflow-y-auto bg-white p-4 shadow-2xl">
+            <button
+              onClick={() => setOpen(false)}
+              aria-label="Close menu"
+              className="mb-2 self-end rounded-full px-3 text-2xl leading-none text-muted hover:bg-surface-alt"
+            >
+              ×
+            </button>
+            {menu}
+          </aside>
+        </div>
+      )}
+    </>
   );
 }

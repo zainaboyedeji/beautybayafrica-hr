@@ -165,7 +165,7 @@ export default function MyPortalPage() {
             <section className="relative mt-2 overflow-hidden rounded-[2rem] bg-gradient-to-br from-brand-deep via-brand-hover to-brand p-6 text-white shadow-xl shadow-brand/30 sm:p-8">
               <div aria-hidden className="absolute -right-12 -top-16 h-60 w-60 animate-float rounded-full bg-white/15" />
               <div aria-hidden className="absolute -bottom-24 right-32 h-48 w-48 animate-float rounded-full bg-violet-300/25 [animation-delay:-3s]" />
-              <div className="relative flex flex-wrap items-center gap-5">
+              <div className="relative flex flex-wrap items-center gap-4 sm:gap-5">
                 <PhotoPicker
                   light
                   employee={profile}
@@ -180,12 +180,13 @@ export default function MyPortalPage() {
                   <h1 className="text-4xl font-semibold">{profile.name.split(" ")[0]}!</h1>
                   <p className="mt-1 text-white/90">
                     {profile.jobTitle}
-                    {profile.departmentName && ` · ${profile.departmentName}`} · {profile.employeeNo}
+                    {profile.departmentName && ` · ${profile.departmentName}`}
+                    <span className="hidden sm:inline"> · {profile.employeeNo}</span>
                   </p>
                 </div>
                 <button
                   onClick={() => setAsking(true)}
-                  className="inline-flex items-center gap-2 rounded-full bg-white px-5 py-3 text-sm font-semibold text-brand-deep shadow-md transition hover:-translate-y-0.5"
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-white px-5 py-3 text-sm font-semibold text-brand-deep shadow-md transition hover:-translate-y-0.5 sm:w-auto"
                 >
                   <Icon name="plus" className="h-4 w-4" />
                   Ask for leave

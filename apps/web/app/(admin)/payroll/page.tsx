@@ -440,20 +440,27 @@ function RunDetail({
       <div className={`mt-4 ${TABLE_CARD}`}><table className={TABLE}>
         <thead className={THEAD}>
           <tr>
-            <th className="px-5 py-3.5">Employee</th>
-            <th className="px-5 py-3.5 text-right">Days paid</th>
-            <th className="px-5 py-3.5 text-right">Gross</th>
-            <th className="px-5 py-3.5 text-right">Deductions</th>
-            <th className="px-5 py-3.5 text-right">Net</th>
-            <th className="px-5 py-3.5">Status</th>
-            <th className="px-5 py-3.5" />
+            <th className="px-4 py-3.5">Employee</th>
+            <th className="px-4 py-3.5 text-right">Gross</th>
+            <th className="px-4 py-3.5 text-right">Deductions</th>
+            <th className="px-4 py-3.5 text-right">Net</th>
+            <th className="px-4 py-3.5">Status</th>
           </tr>
         </thead>
         <tbody className={TBODY}>
           {run.payslips.map((p) => (
             <tr key={p.employeeId} className="align-top">
-              <td className="px-5 py-4">
-                <Person name={p.employeeName} detail={`${p.employeeNo} · ${p.jobTitle}`} />
+              <td className="px-4 py-4">
+                <Person
+                  name={p.employeeName}
+                  detail={
+                    <>
+                      {p.employeeNo} · {p.jobTitle}
+                      <br />
+                      {p.daysPaid} of {p.workingDays} days paid
+                    </>
+                  }
+                />
                 {(p.bonus > 0 || p.otherDeduction > 0) && (
                   <p className="text-xs text-brand-deep">
                     {[
@@ -465,29 +472,25 @@ function RunDetail({
                   </p>
                 )}
               </td>
-              <td className="px-5 py-4 text-right">
-                {p.daysPaid} / {p.workingDays}
-              </td>
-              <td className="px-5 py-4 text-right">{money.format(p.gross)}</td>
-              <td className="px-5 py-4 text-right">{money.format(p.totalDeductions)}</td>
-              <td className="px-5 py-4 text-right font-semibold">{money.format(p.net)}</td>
-              <td className="whitespace-nowrap px-5 py-4">
+              <td className="whitespace-nowrap px-4 py-4 text-right">{money.format(p.gross)}</td>
+              <td className="whitespace-nowrap px-4 py-4 text-right">{money.format(p.totalDeductions)}</td>
+              <td className="whitespace-nowrap px-4 py-4 text-right font-semibold">{money.format(p.net)}</td>
+              {/* Status, reference and actions together, so the table fits beside the months. */}
+              <td className="min-w-48 px-4 py-4">
                 {p.paidAt ? (
                   <>
                     <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-800">
                       <Icon name="check" className="h-3.5 w-3.5" />
                       Paid {formatDay(p.paidAt.slice(0, 10))}
                     </span>
-                    <p className="mt-1 font-mono text-xs text-muted">{p.paymentReference}</p>
+                    <p className="mt-1 break-all font-mono text-xs text-muted">{p.paymentReference}</p>
                   </>
                 ) : (
                   <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-semibold text-amber-800">
                     Not paid
                   </span>
                 )}
-              </td>
-              <td className="whitespace-nowrap px-5 py-4 text-right">
-                <div className="flex items-center justify-end gap-3">
+                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 whitespace-nowrap">
                   {draft && !p.paidAt && (
                     <button
                       onClick={() => setPaying(p)}

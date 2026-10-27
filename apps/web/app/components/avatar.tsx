@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { usePhoto } from "../lib/photo";
 
 // Soft tints, picked by name so each person keeps the same colour everywhere.
@@ -75,7 +76,7 @@ export function Person({
   photoVersion,
 }: {
   name: string;
-  detail?: string;
+  detail?: ReactNode;
   employeeId?: string;
   photoVersion?: string;
 }) {

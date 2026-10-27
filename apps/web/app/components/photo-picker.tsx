@@ -70,7 +70,7 @@ export default function PhotoPicker({
           <Icon name="camera" className="h-4 w-4" />
         </button>
       </div>
-      <div className="flex flex-col items-start gap-1.5">
+      <div className={`flex-col items-start gap-1.5 ${light ? "hidden sm:flex" : "flex"}`}>
         <div className="flex flex-wrap gap-2">
           <button type="button" disabled={busy} onClick={() => input.current?.click()} className={button}>
             {busy ? "Saving…" : employee.photoVersion ? "Change photo" : "Upload photo"}

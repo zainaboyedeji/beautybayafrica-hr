@@ -12,6 +12,7 @@ import type {
 import { COMPANY_EMAIL_DOMAIN } from "@hr/types";
 import ConfirmDialog from "../../components/confirm-dialog";
 import PhotoPicker from "../../components/photo-picker";
+import RowMenu from "../../components/row-menu";
 import Guarantors from "../../components/guarantors";
 import { Person } from "../../components/avatar";
 import {
@@ -241,21 +242,26 @@ export default function EmployeesPage() {
           <div className={TABLE_CARD}><table className={TABLE}>
             <thead className={THEAD}>
               <tr>
-                <th className="px-5 py-3.5">Employee</th>
-                <th className="px-5 py-3.5">Job</th>
-                <th className="px-5 py-3.5">Started</th>
-                <th className="px-5 py-3.5 text-right">Monthly pay</th>
-                <th className="px-5 py-3.5 text-right">Annual leave left</th>
-                <th className="px-5 py-3.5" />
+                <th className="px-4 py-3.5">Employee</th>
+                <th className="px-4 py-3.5">Job</th>
+                <th className="px-4 py-3.5 text-right">Monthly pay</th>
+                <th className="px-4 py-3.5 text-right">Annual leave left</th>
+                <th className="px-4 py-3.5 text-right">Manage</th>
               </tr>
             </thead>
             <tbody className={TBODY}>
               {visible.map((e) => (
                 <tr key={e.id} className={`align-top ${hasLeft(e) ? "text-muted" : ""}`}>
-                  <td className="px-5 py-4">
+                  <td className="px-4 py-4">
                     <Person
                       name={e.name}
-                      detail={`${e.employeeNo} · ${e.email}`}
+                      detail={
+                        <>
+                          {e.employeeNo}
+                          <br />
+                          {e.email}
+                        </>
+                      }
                       employeeId={e.id}
                       photoVersion={e.photoVersion}
                     />
@@ -265,37 +271,37 @@ export default function EmployeesPage() {
                       </span>
                     )}
                   </td>
-                  <td className="px-5 py-4">
+                  <td className="px-4 py-4">
                     {e.jobTitle}
                     <p className="text-muted">
                       {[e.departmentName, EMPLOYMENT_LABELS[e.employmentType]]
                         .filter(Boolean)
                         .join(" · ")}
                     </p>
+                    <p className="whitespace-nowrap text-xs text-muted">
+                      Started {formatDay(e.startDate)}
+                      {e.endDate && ` · ${hasLeft(e) ? "left" : "leaving"} ${formatDay(e.endDate)}`}
+                    </p>
                   </td>
-                  <td className="whitespace-nowrap px-5 py-4">
-                    {formatDay(e.startDate)}
-                    {e.endDate && (
-                      <p className="text-muted">
-                        {hasLeft(e) ? "Left" : "Leaving"} {formatDay(e.endDate)}
+                  <td className="px-4 py-4 text-right">
+                    <span className="whitespace-nowrap font-medium">
+                      {money.format(e.baseSalary + e.monthlyAllowances)}
+                    </span>
+                    <p className="whitespace-nowrap text-xs text-muted">
+                      Basic {money.format(e.baseSalary)}
+                    </p>
+                    {e.monthlyAllowances > 0 && (
+                      <p className="whitespace-nowrap text-xs text-muted">
+                        + {money.format(e.monthlyAllowances)} allowances
                       </p>
                     )}
                   </td>
-                  <td className="whitespace-nowrap px-5 py-4 text-right">
-                    <span className="font-medium">
-                      {money.format(e.baseSalary + e.monthlyAllowances)}
-                    </span>
-                    <p className="text-xs text-muted">
-                      Basic {money.format(e.baseSalary)}
-                      {e.monthlyAllowances > 0 &&
-                        ` + ${money.format(e.monthlyAllowances)} allowances`}
-                    </p>
-                  </td>
-                  <td className="px-5 py-4 text-right">
+                  <td className="px-4 py-4 text-right">
                     <LeaveMeter left={e.annualLeaveDays - e.annualLeaveTaken} of={e.annualLeaveDays} />
                   </td>
-                  <td className="whitespace-nowrap px-5 py-4 text-right">
-                    <div className="flex justify-end gap-3">
+                  {/* The everyday actions, with the rest under "More", so a row fits a laptop screen. */}
+                  <td className="whitespace-nowrap px-4 py-4 text-right">
+                    <div className="flex justify-end gap-2.5">
                       <button
                         onClick={() => setDialog({ kind: "edit", employee: e })}
                         className="font-medium text-brand-deep hover:underline"
@@ -317,24 +323,6 @@ export default function EmployeesPage() {
                         )}
                       </button>
                       <button
-                        onClick={() => setDialog({ kind: "guarantors", employee: e })}
-                        className="font-medium text-brand-deep hover:underline"
-                        title={`${e.verifiedGuarantors} of ${e.guarantors} verified`}
-                      >
-                        Guarantors
-                        <span
-                          className={`ml-1 rounded-full px-1.5 py-0.5 text-xs ${
-                            e.guarantors === 0
-                              ? "bg-red-50 text-red-700"
-                              : e.verifiedGuarantors === e.guarantors
-                                ? "bg-emerald-100 text-emerald-800"
-                                : "bg-amber-100 text-amber-800"
-                          }`}
-                        >
-                          {e.guarantors}
-                        </span>
-                      </button>
-                      <button
                         onClick={() => setDialog({ kind: "login", employee: e })}
                         className="font-medium text-brand-deep hover:underline"
                         title={
@@ -347,18 +335,39 @@ export default function EmployeesPage() {
                       >
                         Portal{e.canLogIn && !e.deactivatedAt ? " ✓" : ""}
                       </button>
-                      <button
-                        onClick={() => setDialog({ kind: "active", employee: e })}
-                        className={`font-medium hover:underline ${e.deactivatedAt ? "text-brand-deep" : "text-red-700"}`}
-                      >
-                        {e.deactivatedAt ? "Reactivate" : "Deactivate"}
-                      </button>
-                      <button
-                        onClick={() => setDialog({ kind: "delete", employee: e })}
-                        className="font-medium text-red-700 hover:underline"
-                      >
-                        Delete
-                      </button>
+                      <RowMenu
+                        items={[
+                          {
+                            label: (
+                              <>
+                                Guarantors
+                                <span
+                                  className={`ml-auto rounded-full px-1.5 py-0.5 text-xs ${
+                                    e.guarantors === 0
+                                      ? "bg-red-50 text-red-700"
+                                      : e.verifiedGuarantors === e.guarantors
+                                        ? "bg-emerald-100 text-emerald-800"
+                                        : "bg-amber-100 text-amber-800"
+                                  }`}
+                                >
+                                  {e.verifiedGuarantors}/{e.guarantors} verified
+                                </span>
+                              </>
+                            ),
+                            onSelect: () => setDialog({ kind: "guarantors", employee: e }),
+                          },
+                          {
+                            label: e.deactivatedAt ? "Reactivate" : "Deactivate",
+                            danger: !e.deactivatedAt,
+                            onSelect: () => setDialog({ kind: "active", employee: e }),
+                          },
+                          {
+                            label: "Delete",
+                            danger: true,
+                            onSelect: () => setDialog({ kind: "delete", employee: e }),
+                          },
+                        ]}
+                      />
                     </div>
                   </td>
                 </tr>
