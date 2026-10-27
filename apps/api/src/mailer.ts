@@ -10,6 +10,11 @@ const transport = process.env.SMTP_HOST
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT ?? 587),
       secure: process.env.SMTP_PORT === "465",
+      // Give up on a slow mail server in seconds, not the default 10 minutes,
+      // so nobody is left waiting and the outbox records why.
+      connectionTimeout: 15_000,
+      greetingTimeout: 15_000,
+      socketTimeout: 30_000,
       ...(process.env.SMTP_USER
         ? { auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS ?? "" } }
         : {}),

@@ -2653,7 +2653,9 @@ app.post("/public/contracts/:token/accept", async (req, res) => {
     ]);
     return employee.password_hash === null ? sendSetupLink(client, employee) : null;
   });
-  if (send) await send();
+  // The new starter isn't kept waiting on the mail server: the set-up email
+  // goes in the background and lands in the outbox either way.
+  if (send) void send().catch((err) => console.error("Set-up email failed:", err));
   res.json({ accepted: true, setupEmailSent: send !== null });
 });
 
